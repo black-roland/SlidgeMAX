@@ -4,6 +4,6 @@ header:
     copyright-owner: "@black-roland"
 
   paths:
-    - "src/max_transport/**/*.py"
+    - "src/slidgemax/**/*.py"
 
   comment: on-failure
