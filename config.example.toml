@@ -1,0 +1,61 @@
+# MAX XMPP transport — copy to config.toml and edit.
+# Strings may use environment variables: secret = "${MAX_COMPONENT_SECRET}"
+
+[component]
+# Component JID. Must match the Prosody `Component "..."` name.
+jid = "max.example.org"
+# Shared secret with Prosody (`component_secret`).
+secret = "change-me"
+# Host and port of the XMPP server's external-component listener.
+server = "127.0.0.1"
+port = 5347
+# Disco identity name shown in clients.
+name = "XMPP-MAX gateway"
+# Some servers expect jabber:client on component stanzas. Leave false for Prosody.
+use_jabber_client_ns = false
+
+[storage]
+# All transport state lives here (created automatically).
+#   users/*.json     registered XMPP accounts (small)
+#   sessions/<jid>/  PyMax SQLite session files (tokens, sync)
+#   msgids.sqlite    MAX ↔ XMPP message-id map (needed for edits)
+data_dir = "./data"
+
+[max]
+# Device type advertised to MAX. DESKTOP is the phone+SMS login path.
+# One of: DESKTOP, ANDROID, IOS
+device_type = "DESKTOP"
+reconnect = true
+reconnect_delay_seconds = 3.0
+
+[bridge]
+# Keep MAX sessions running even if the XMPP user is offline so incoming
+# MAX messages become XMPP offline messages.
+always_online = true
+# Push MAX contacts as gateway roster subscriptions on login.
+sync_contacts_on_login = true
+# Auto-accept XMPP subscribe requests to MAX contact JIDs.
+auto_subscribe = true
+# Drop group/channel messages (groups are out of scope).
+ignore_groups = true
+# Turn incoming MAX calls into a plain-text XMPP notice.
+call_notifications = true
+call_voice_text = "Incoming voice call"
+call_video_text = "Incoming video call"
+# Notify when MAX sends non-text content we do not bridge.
+placeholder_unsupported = true
+unsupported_text = "Unsupported MAX content (not bridged)."
+# How long to wait for SMS / 2FA during ad-hoc registration, in seconds.
+registration_timeout_seconds = 120
+
+[registration]
+# Empty list = any domain may register. Otherwise only these XMPP domains.
+allowed_domains = []
+# If non-empty, only these bare JIDs may register (in addition to the domain filter).
+allowed_jids = []
+
+[logging]
+# DEBUG, INFO, WARNING, ERROR
+level = "INFO"
+# Optional file. Empty = stderr only.
+file = ""
