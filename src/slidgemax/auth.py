@@ -1,17 +1,3 @@
-# Copyright 2026 @black-roland
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 from __future__ import annotations
 
 import asyncio
@@ -19,11 +5,11 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-log = logging.getLogger("max_transport.auth")
+log = logging.getLogger("slidgemax.auth")
 
 
 class QueueSmsProvider:
-    """SmsCodeProvider that waits for an ad-hoc form to supply the code."""
+    """SmsCodeProvider that waits for a Slidge 2FA prompt to supply the code."""
 
     def __init__(self) -> None:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
@@ -43,6 +29,7 @@ class QueuePasswordProvider:
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self.hint: str | None = None
         self.requested = asyncio.Event()
+        self.requests = 0
         self._on_request = on_request
 
     async def set_password(self, password: str) -> None:
@@ -50,6 +37,7 @@ class QueuePasswordProvider:
 
     async def get_password(self, hint: str | None = None) -> str:
         self.hint = hint
+        self.requests += 1
         self.requested.set()
         log.info("MAX requested 2FA password (hint=%s)", hint)
         if self._on_request is not None:
@@ -57,19 +45,3 @@ class QueuePasswordProvider:
             if asyncio.iscoroutine(result):
                 await result
         return await self._queue.get()
-
-
-class AuthAttempt:
-    """Tracks one in-flight MAX login (phone → SMS → optional 2FA)."""
-
-    def __init__(self, phone: str) -> None:
-        self.phone = phone
-        self.sms = QueueSmsProvider()
-        self.password = QueuePasswordProvider()
-        self.started = asyncio.Event()
-        self.finished = asyncio.Event()
-        self.error: str | None = None
-        self.me_id: int | None = None
-        self.me_name: str | None = None
-        self.client: Any = None
-        self.task: asyncio.Task[None] | None = None

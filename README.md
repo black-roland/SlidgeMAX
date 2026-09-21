@@ -1,150 +1,124 @@
-# MAX Transport
+# SlidgeMAX
 
-XMPP external component (XEP-0114) that puppeteers a [MAX](https://max.ru) account via [PyMax](https://docs.pymax.org/getting-started.html) and presents it on Prosody (or any component-capable server).
+XMPP gateway (legacy module) for the [MAX](https://max.ru) messenger, built on [Slidge](https://slidge.im/).
 
-**In scope:** contacts, 1:1 messages, message editing, text notices for incoming calls, ad-hoc registration.
-
-**Out of scope:** groups, `WebClient` / QR login, reactions, stickers, polls, files, voice messages, calls themselves, rich formatting, profile photos.
-
-## How it maps
-
-| MAX | XMPP |
-| --- | --- |
-| Your account | Gateway registration on the component JID |
-| Contact with id `123` | `123@max.example.org` |
-| Direct message | `<message type="chat">` |
-| Edit | [XEP-0308](https://xmpp.org/extensions/xep-0308.html) last-message correction |
-| Incoming call | Plain-text message (`Incoming voice call` / `Incoming video call`) |
-| Dialog chat id | `me_id XOR peer_id` (MAX's own formula) |
+Bridges 1:1 chats, message editing, and text notifications for calls. No groups.
 
 ## Requirements
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/)
-- An XMPP server that accepts external components (Prosody is the target)
+- Python >= 3.13
+- An XMPP server with external component support (Prosody recommended)
+- `uv` or pip
 
-## Install
+## Install for systemd (`/opt/slidgemax`)
+
+Slidge is not a separate daemon. It is a Python library pulled in when this package is installed. The systemd unit runs `/opt/slidgemax/bin/slidgemax`, which calls Slidge with `--legacy-module slidgemax`.
+
+Requires Python 3.13+. On RHEL, AlmaLinux, or Rocky Linux, install `uv` from EPEL and let it use a matching interpreter.
 
 ```bash
-git clone <this-repo>
-cd max-transport
-uv python pin 3.11
+# as root
+dnf install epel-release
+dnf install uv python3.14
+
+git clone <repo> /opt/slidgemax-src
+cd /opt/slidgemax-src
+uv venv /opt/slidgemax --python 3.14
+uv pip install --python /opt/slidgemax/bin/python .
+
+# Slidge lands in the same venv:
+/opt/slidgemax/bin/python -c 'import slidge, slidgemax; print(slidge.__version__, slidgemax.__version__)'
+/opt/slidgemax/bin/slidgemax --help
+```
+
+Leave `/opt/slidgemax` owned by root and world-executable. The service user only needs to run that interpreter; it must not write there. State (Slidge database, PyMax session files) goes under `/var/lib/slidgemax/<jid>/`.
+
+To upgrade, pull the source and reinstall into the same venv:
+
+```bash
+cd /opt/slidgemax-src
+git pull
+uv pip install --python /opt/slidgemax/bin/python .
+systemctl restart slidgemax@max.example.org.service
+```
+
+## Run (development)
+
+From a checkout, without the `/opt` install:
+
+```bash
 uv sync
-cp config.example.toml config.toml
+uv run slidge \
+  --legacy-module slidgemax \
+  --jid max.example.org \
+  --secret "shared-secret" \
+  --home-dir ./data \
+  --server 127.0.0.1 --port 5347
 ```
 
-Edit `config.toml`. At minimum set:
+## Registration
 
-- `component.jid` — must match the Prosody component name
-- `component.secret` — shared secret
-- `component.server` / `component.port` — usually `127.0.0.1:5347`
+1. In your XMPP client, discover the component.
+2. Run the **Register** ad-hoc command (or send "register").
+3. Provide phone number, then the SMS code in the next form.
+4. If MAX has account 2FA, a third form asks for that password. Do not send it as a chat message.
 
-Run:
+Contacts appear as `123456@max.example.org`.
 
-```bash
-uv run max-transport --config config.toml
+## Prosody example
+
 ```
-
-Validate without connecting:
-
-```bash
-uv run max-transport --config config.toml --check-config
-```
-
-## Prosody
-
-```lua
--- prosody.cfg.lua, or a virtual host file
 Component "max.example.org"
-    component_secret = "the-same-secret-as-config.toml"
+    component_secret = "shared-secret"
 ```
 
-Restart Prosody after adding the component. The transport then connects *out* to Prosody's component port (`component_ports` / `component_interface`, default `5347` on localhost).
+## Running as a systemd service
 
-DNS: `max.example.org` does not need an A record if only local users use it. For federation, give the component a proper hostname on the same domain as the virtual host.
+Install into `/opt/slidgemax` first (see above). The unit is `contrib/systemd/slidgemax@.service`. The instance name is the component JID. Settings use `/etc/sysconfig`: `KEY=value`, no `export`.
 
-## Registration (ad-hoc)
+```bash
+# as root, after /opt/slidgemax is installed
+useradd --system --home-dir /var/lib/slidgemax --shell /usr/sbin/nologin slidgemax
+install -d -o slidgemax -g slidgemax -m 0750 /var/lib/slidgemax
 
-Registration is [XEP-0050](https://xmpp.org/extensions/xep-0050.html), not in-band registration. SMS and optional 2FA do not fit a single IBR form.
+cp contrib/systemd/slidgemax@.service /etc/systemd/system/
 
-1. Discover the gateway (`max.example.org`).
-2. Run **Register MAX account**.
-3. Phone number → SMS code → 2FA password if MAX asks.
-4. Contacts arrive as subscription requests from `id@max.example.org`.
+# Required per-instance file. Optional shared defaults: /etc/sysconfig/slidgemax
+cat > /etc/sysconfig/slidgemax-max.example.org <<EOF
+MAX_COMPONENT_SECRET=your-component-secret
+EOF
+chmod 640 /etc/sysconfig/slidgemax-max.example.org
+chown root:slidgemax /etc/sysconfig/slidgemax-max.example.org
 
-**Gajim:** Accounts → Discover services → the gateway → Execute command.
+systemctl daemon-reload
+systemctl enable --now slidgemax@max.example.org.service
+journalctl -u slidgemax@max.example.org -f
+```
 
-**Conversations / Dino:** Service discovery on the gateway → Commands.
-
-A short chat with the component JID (`help`, `status`) is available for clients that hide commands.
-
-In-band register (`jabber:iq:register`) is advertised because XEP-0100 expects it, but the form tells you to use the ad-hoc command.
-
-### Adding a MAX user who is not in your contacts
-
-Use gateway translation (`jabber:iq:gateway`) if the client supports "Add contact via gateway": enter a MAX user id or a phone number. The transport returns `id@max.example.org`.
+`ExecStart` is `/opt/slidgemax/bin/slidgemax`. That script starts Slidge; do not install Slidge on its own for this unit. Prosody must use the same JID and the same `MAX_COMPONENT_SECRET`.
 
 ## Configuration
 
-TOML. String values expand environment variables (`secret = "${MAX_COMPONENT_SECRET}"`).
+Slidge options apply (`--home-dir`, logging, etc.).
 
-| Table | Options |
-| --- | --- |
-| `[component]` | `jid`, `secret`, `server`, `port`, `name`, `use_jabber_client_ns` |
-| `[storage]` | `data_dir` |
-| `[max]` | `device_type` (`DESKTOP` / `ANDROID` / `IOS`), `reconnect`, `reconnect_delay_seconds` |
-| `[bridge]` | `always_online`, `sync_contacts_on_login`, `auto_subscribe`, `ignore_groups`, `call_notifications`, call/unsupported text, `registration_timeout_seconds` |
-| `[registration]` | `allowed_domains`, `allowed_jids` |
-| `[logging]` | `level`, `file` |
+Additional runtime flags are not exposed yet; defaults are sensible (reconnect on, ignore groups, call notifications on, placeholder for unsupported media).
 
-See [`config.example.toml`](config.example.toml).
+PyMax sessions are stored under `$HOME_DIR/max-sessions/`.
 
-`always_online = true` (default) keeps the MAX TCP session up even when the XMPP user is offline, so incoming MAX messages become XMPP offline messages.
+## Limitations (as designed)
 
-## Storage
+- 1:1 only (groups out of scope)
+- Text, edits, and call notifications only
+- No files, voice, stickers, reactions, rich cards, avatars
+- PyMax is unofficial
 
-Files under `data_dir`:
-
-```
-data/
-  users/<jid>.json      # registration records
-  sessions/<jid>/       # PyMax SQLite session (token, device, sync)
-  msgids.sqlite         # MAX message id ↔ XMPP origin-id (edits)
-```
-
-User records are JSON. Message-id maps use SQLite because they grow with every bridged message and must be queried both ways for XEP-0308.
-
-Deleting `sessions/<jid>/` forces a fresh SMS login on the next start.
-
-## XEPs
-
-- XEP-0114 component connection
-- XEP-0030 service discovery (`gateway` / `max`)
-- XEP-0050 ad-hoc commands (register / unregister / status / reconnect)
-- XEP-0077 advertised; actual signup is ad-hoc
-- XEP-0100 gateway interaction (login/logout, contact add/remove)
-- jabber:iq:gateway (id/phone → JID)
-- XEP-0308 message correction
-- XEP-0359 origin-id
-- XEP-0199 keepalives
-
-## Tests
+## Development
 
 ```bash
-uv sync --all-extras
+uv sync --dev
 uv run pytest
 ```
 
-Live MAX or Prosody is not required for the unit tests.
-
-## Limitations
-
-- One MAX account per XMPP account.
-- Groups and channels are dropped (`ignore_groups`).
-- Non-text MAX payloads become a configurable placeholder.
-- Incoming calls are notified as text; you cannot answer them here.
-- PyMax talks to MAX's unofficial internal API. It can change without notice.
-
 ## License
 
-MIT
+Apache-2.0

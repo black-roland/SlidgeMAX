@@ -1,0 +1,51 @@
+# Sample systemd service for SlidgeMAX (RHEL / AlmaLinux / Rocky Linux).
+#
+# The instance name is the component JID, for example:
+#   systemctl enable --now slidgemax@max.example.org.service
+#
+# Install the application into /opt/slidgemax first (see README).
+# Put secrets in /etc/sysconfig/slidgemax-<jid> (no "export", KEY=value).
+
+[Unit]
+Description=SlidgeMAX - XMPP gateway for MAX (%i)
+Documentation=https://github.com/black-roland/slidgemax
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=slidgemax
+Group=slidgemax
+
+WorkingDirectory=/var/lib/slidgemax/%i
+StateDirectory=slidgemax/%i
+
+# Shared defaults, then per-instance overrides. The instance file is required.
+EnvironmentFile=-/etc/sysconfig/slidgemax
+EnvironmentFile=/etc/sysconfig/slidgemax-%i
+
+ExecStart=/opt/slidgemax/bin/slidgemax \
+    --jid %i \
+    --secret ${MAX_COMPONENT_SECRET} \
+    --home-dir /var/lib/slidgemax/%i \
+    --server 127.0.0.1 \
+    --port 5347
+
+Restart=on-failure
+RestartSec=10s
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

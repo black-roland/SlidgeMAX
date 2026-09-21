@@ -5,6 +5,5 @@ header:
 
   paths:
     - "src/max_transport/**/*.py"
-    - "tests/**/*.py"
 
   comment: on-failure

@@ -1,23 +1,14 @@
-# Copyright 2026 @black-roland
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 from __future__ import annotations
 
 import re
 from typing import Any
 
 _PHONE_STRIP = re.compile(r"[\s\-().]")
+
+
+def session_dirname(key: str) -> str:
+    """Stable directory name for a JID or phone under max-sessions/."""
+    return re.sub(r"[^a-zA-Z0-9._-]+", "_", key.replace("@", "_at_")) or "user"
 
 
 def normalize_phone(raw: str) -> str:
@@ -71,31 +62,6 @@ def dialog_chat_id(first_user_id: int, second_user_id: int) -> int:
     return first_user_id ^ second_user_id
 
 
-def dialog_peer_id(chat_id: int, me_id: int) -> int:
-    return chat_id ^ me_id
-
-
-def chat_type_name(chat: Any) -> str:
-    if chat is None:
-        return ""
-    t = getattr(chat, "type", None)
-    if t is None:
-        return ""
-    name = getattr(t, "name", None)
-    if name:
-        return str(name).upper()
-    return str(t).upper()
-
-
-def is_group_chat(chat: Any) -> bool:
-    name = chat_type_name(chat)
-    if not name:
-        return False
-    if "DIALOG" in name:
-        return False
-    return "GROUP" in name or name == "CHAT" or "CHANNEL" in name
-
-
 def display_name(user: Any, fallback: str | None = None) -> str:
     if user is None:
         return fallback or "MAX user"
@@ -120,6 +86,30 @@ def display_name(user: Any, fallback: str | None = None) -> str:
     if ident is not None:
         return fallback or f"MAX {ident}"
     return fallback or "MAX user"
+
+
+def attachment_type_name(attach: Any) -> str:
+    t = getattr(attach, "type", None)
+    if t is not None:
+        name = getattr(t, "name", None) or str(t)
+        return str(name).upper()
+    return type(attach).__name__.upper()
+
+
+def is_call_attachment(attach: Any) -> bool:
+    name = attachment_type_name(attach)
+    return "CALL" in name
+
+
+def is_text_attachment_only(message: Any) -> bool:
+    attaches = list(getattr(message, "attaches", None) or [])
+    if not attaches:
+        return True
+    return all(attachment_type_name(a) in {"", "CONTROL", "NONE"} for a in attaches)
+
+
+# MAX protocol: NOTIF_INCOMING_CALL
+INCOMING_CALL_OPCODE = 137
 
 
 def payload_as_dict(payload: Any) -> dict[str, Any]:
@@ -163,10 +153,6 @@ def opcode_value(opcode: Any) -> int | None:
     if isinstance(opcode, str) and opcode.isdigit():
         return int(opcode)
     return None
-
-
-# MAX protocol: NOTIF_INCOMING_CALL
-INCOMING_CALL_OPCODE = 137
 
 
 def looks_like_incoming_call(opcode: Any, payload: dict[str, Any]) -> bool:
@@ -214,23 +200,3 @@ def parse_call_info(payload: dict[str, Any]) -> dict[str, Any]:
         "video": bool(video),
         "name": data.get("name") or data.get("callerName") or data.get("title"),
     }
-
-
-def attachment_type_name(attach: Any) -> str:
-    t = getattr(attach, "type", None)
-    if t is not None:
-        name = getattr(t, "name", None) or str(t)
-        return str(name).upper()
-    return type(attach).__name__.upper()
-
-
-def is_call_attachment(attach: Any) -> bool:
-    name = attachment_type_name(attach)
-    return "CALL" in name
-
-
-def is_text_attachment_only(message: Any) -> bool:
-    attaches = list(getattr(message, "attaches", None) or [])
-    if not attaches:
-        return True
-    return all(attachment_type_name(a) in {"", "CONTROL", "NONE"} for a in attaches)
