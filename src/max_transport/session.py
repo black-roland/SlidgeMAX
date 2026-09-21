@@ -98,6 +98,7 @@ class MaxSession:
         self._on_edit: IncomingHandler | None = None
         self._on_call: IncomingHandler | None = None
         self._on_ready: IncomingHandler | None = None
+        self._pushed_peers: set[int] = set()
 
     @property
     def jid(self) -> str:
@@ -358,6 +359,25 @@ class MaxSession:
         except Exception:
             log.debug("get_user(%s) failed", user_id, exc_info=True)
             return None
+
+    async def lookup_users(self, user_ids: list[int]) -> dict[int, Any]:
+        client = self.client
+        if client is None:
+            return {}
+        getter = getattr(client, "get_users", None)
+        if getter is None:
+            return {}
+        try:
+            results = await getter(user_ids)
+        except Exception:
+            log.debug("get_users(%s) failed", user_ids, exc_info=True)
+            return {}
+        users: dict[int, Any] = {}
+        for user in results or []:
+            ident = int_or_none(user)
+            if ident is not None:
+                users[ident] = user
+        return users
 
     async def search_phone(self, phone: str) -> Any | None:
         client = self.client

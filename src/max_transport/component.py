@@ -301,17 +301,17 @@ class MaxComponent(ComponentXMPP):
             await self.push_contacts(session)
 
     async def push_contacts(self, session: MaxSession) -> None:
-        seen: set[int] = set()
         me_id = session.me_id
+        contact_peers: list[tuple[int, Any]] = []
         for user in session.contacts():
             ident = int_or_none(user)
             if ident is None or ident == me_id:
                 continue
-            seen.add(ident)
-            self._send_contact_presence(session.jid, ident, display_name(user))
+            contact_peers.append((ident, user))
+        chat_peers: list[tuple[int, Any]] = []
         for chat in session.dialogs() + session.chats():
             ident = int_or_none(getattr(chat, "owner", None))
-            if ident is None or ident == me_id or ident in seen:
+            if ident is None or ident == me_id:
                 continue
             t = str(getattr(getattr(chat, "type", None), "name", getattr(chat, "type", ""))).upper()
             if t and "DIALOG" not in t and ("CHAT" in t or "CHANNEL" in t or "GROUP" in t):
@@ -320,10 +320,25 @@ class MaxComponent(ComponentXMPP):
                 chat_id = int_or_none(getattr(chat, "id", None))
                 if chat_id is not None:
                     ident = ident or (chat_id ^ me_id)
-            if ident is None or ident in seen:
+            if ident is None:
+                continue
+            chat_peers.append((ident, chat))
+        all_ids = [ident for ident, _ in contact_peers + chat_peers]
+        enriched = await session.lookup_users(all_ids) if all_ids else {}
+        seen: set[int] = set()
+        for ident, user in contact_peers:
+            seen.add(ident)
+            session._pushed_peers.add(ident)
+            enriched_user = enriched.get(ident, user)
+            self._send_contact_presence(session.jid, ident, display_name(enriched_user))
+        for ident, chat in chat_peers:
+            if ident in seen:
                 continue
             seen.add(ident)
-            name = display_name(None, fallback=getattr(chat, "title", None) or f"MAX {ident}")
+            session._pushed_peers.add(ident)
+            enriched_user = enriched.get(ident)
+            fallback = getattr(chat, "title", None) or f"MAX {ident}"
+            name = display_name(enriched_user, fallback=fallback)
             self._send_contact_presence(session.jid, ident, name)
 
     def _send_contacts_unavailable(self, session: MaxSession) -> None:
@@ -352,6 +367,12 @@ class MaxComponent(ComponentXMPP):
         peer_id = session.resolve_dialog_peer(message)
         if peer_id is None:
             return
+        if peer_id not in session._pushed_peers:
+            user = await session.lookup_user(peer_id)
+            self._send_contact_presence(
+                session.jid, peer_id, display_name(user, fallback=f"MAX {peer_id}")
+            )
+            session._pushed_peers.add(peer_id)
         body = getattr(message, "text", None)
         if not body:
             if self.config.bridge.placeholder_unsupported and not is_text_attachment_only(message):

@@ -45,6 +45,17 @@ def test_display_name() -> None:
     assert display_name(user2) == "Bob"
 
 
+def test_display_name_with_enriched_user() -> None:
+    from pymax.types.domain import Name, User
+
+    user = User(id=1, names=[Name(name=None, first_name="Ada", last_name="Lovelace")])
+    assert display_name(user) == "Ada Lovelace"
+    user2 = User(id=2, names=[Name(name="Bob")])
+    assert display_name(user2) == "Bob"
+    user3 = User(id=3)
+    assert display_name(user3, fallback="MAX 3") == "MAX 3"
+
+
 def test_group_chat_detection() -> None:
     dialog = SimpleNamespace(type=SimpleNamespace(name="DIALOG"))
     group = SimpleNamespace(type=SimpleNamespace(name="CHAT"))

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from max_transport.config import config_from_dict
 from max_transport.session import MaxSession
@@ -50,3 +51,47 @@ def test_echo_from_self_still_maps_peer() -> None:
     session = _session()
     message = SimpleNamespace(chat_id=19, sender=10)
     assert session.resolve_dialog_peer(message) == 25
+
+
+async def test_lookup_users_returns_dict_keyed_by_id() -> None:
+    session = _session()
+    user1 = SimpleNamespace(id=1, names=[SimpleNamespace(name="Ada Lovelace")])
+    user2 = SimpleNamespace(id=2, names=[SimpleNamespace(name="Bob")])
+    session.client.get_users = AsyncMock(return_value=[user1, user2])
+    result = await session.lookup_users([1, 2])
+    assert result == {1: user1, 2: user2}
+    assert result[1].id == 1
+    assert result[2].id == 2
+
+
+async def test_lookup_users_skips_missing_users() -> None:
+    session = _session()
+    user1 = SimpleNamespace(id=1, names=[SimpleNamespace(name="Ada Lovelace")])
+    user3 = SimpleNamespace(id=3, names=[SimpleNamespace(name="Charlie")])
+    session.client.get_users = AsyncMock(return_value=[user1, user3])
+    result = await session.lookup_users([1, 2, 3])
+    assert result == {1: user1, 3: user3}
+    assert 2 not in result
+
+
+async def test_lookup_users_no_client() -> None:
+    session = _session()
+    session.client = None
+    assert await session.lookup_users([1, 2]) == {}
+
+
+async def test_lookup_users_no_get_users_method() -> None:
+    session = _session()
+    assert await session.lookup_users([1, 2]) == {}
+
+
+async def test_lookup_users_handles_exception() -> None:
+    session = _session()
+    session.client.get_users = AsyncMock(side_effect=RuntimeError("server error"))
+    assert await session.lookup_users([1, 2]) == {}
+
+
+async def test_lookup_users_empty_input() -> None:
+    session = _session()
+    session.client.get_users = AsyncMock(return_value=[])
+    assert await session.lookup_users([]) == {}
