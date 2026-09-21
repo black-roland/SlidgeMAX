@@ -116,14 +116,21 @@ class MaxComponent(ComponentXMPP):
         self["xep_0030"].add_feature(NS_GATEWAY)
         register_commands(self)
         if self.config.bridge.always_online:
-            for user in self.users.list():
-                session = await self.sessions.start_user(user)
+            users = self.users.list()
+            log.info("always_online: resuming %d registered session(s)", len(users))
+            for user in users:
+                try:
+                    session = await self.sessions.start_user(user)
+                except Exception:
+                    log.exception("always_online: failed to start session for %s", user.jid)
+                    continue
                 session.set_handlers(
                     on_message=self.on_max_message,
                     on_edit=self.on_max_edit,
                     on_call=self.on_max_call,
                     on_ready=self.on_max_ready,
                 )
+                log.info("always_online: started session for %s (login in progress)", user.jid)
 
     async def on_disconnected(self, _event: Any) -> None:
         log.warning("component disconnected from %s", self.config.component.server)
@@ -274,6 +281,7 @@ class MaxComponent(ComponentXMPP):
         self.send_presence(pto=from_jid, pfrom=contact, ptype="unavailable")
 
     async def on_max_ready(self, session: MaxSession) -> None:
+        log.info("MAX session ready for %s", session.jid)
         self.users.save(session.user)
         if self.config.bridge.sync_contacts_on_login:
             await self.push_contacts(session)
@@ -459,13 +467,17 @@ class MaxComponent(ComponentXMPP):
             return
         await session.remove_contact(peer_id)
 
-    def _ibr_user_get(self, _jid: Any, _node: Any, ifrom: JID, _iq: Any) -> dict[str, str] | None:
+    def _ibr_user_get(self, _jid: Any, _node: Any, ifrom: JID, iq: Any) -> dict[str, str] | None:
+        if ifrom is None:
+            ifrom = iq["from"]
         user = self.users.get(bare_jid(str(ifrom)))
         if user is None:
             return None
         return {"username": user.phone, "password": ""}
 
-    def _ibr_user_remove(self, _jid: Any, _node: Any, ifrom: JID, _iq: Any) -> None:
+    def _ibr_user_remove(self, _jid: Any, _node: Any, ifrom: JID, iq: Any) -> None:
+        if ifrom is None:
+            ifrom = iq["from"]
         jid = bare_jid(str(ifrom))
         if self.users.get(jid) is None:
             raise KeyError(jid)
