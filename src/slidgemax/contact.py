@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator
 from slidge import LegacyContact, LegacyRoster
 from slidge.util.types import ContactMessage  # type: ignore
 
-from .util import display_name, int_or_none
+from .util import dialog_peer_id, display_name, int_or_none
 
 if TYPE_CHECKING:
     from .session import Session
@@ -26,7 +26,20 @@ class Contact(LegacyContact):
         if uid is None:
             return
         user = await self.session.lookup_user(uid)
+        if user is None:
+            cached = getattr(self.session.client, "get_cached_user", None)
+            if callable(cached):
+                user = cached(uid)
         self.name = display_name(user, fallback=f"MAX {uid}")
+        self.is_friend = True
+
+    def _send(self, stanza: Any, carbon: bool = False, nick: bool = False, **send_kwargs: Any) -> Any:
+        # Friends only get an XEP-0172 nick when nick=True. Gajim and Dino otherwise show the JID.
+        return super()._send(stanza, carbon=carbon, nick=bool(self.name) or nick, **send_kwargs)
+
+    async def backfill(self, after: Any) -> None:
+        """History sync is out of scope. Must not raise, or roster fill stops."""
+        return
 
     async def on_message(self, message: ContactMessage) -> str | None:  # type: ignore[override]
         """
@@ -78,32 +91,55 @@ class Roster(LegacyRoster[Contact]):
     async def fill(self) -> AsyncIterator[Contact]:
         sess = self.session
         seen: set[int] = set()
-
-        for u in sess.contacts_list():
-            uid = int_or_none(u)
-            if uid is None or uid in seen:
-                continue
-            seen.add(uid)
-            c = await self.by_legacy_id(str(uid))
-            await c.update_info()
-
         me = sess.me_id
-        for d in sess.dialogs_list() + sess.chats_list():
-            owner = int_or_none(getattr(d, "owner", None))
-            if owner is None or (me is not None and owner == me):
-                continue
-            tname = str(getattr(getattr(d, "type", None), "name", getattr(d, "type", ""))).upper()
-            if "DIALOG" not in tname and ("GROUP" in tname or "CHANNEL" in tname or tname == "CHAT"):
-                continue
-            cid = int_or_none(getattr(d, "id", None))
-            if cid is not None and me is not None:
-                peer = cid ^ me
-                if peer in seen:
-                    continue
-                seen.add(peer)
-                c = await self.by_legacy_id(str(peer))
-                await c.update_info()
+        address_book = sess.contacts_list()
+        chats = sess.chats_list()
+        log.info(
+            "filling roster me=%s address_book=%s chats=%s",
+            me,
+            len(address_book),
+            len(chats),
+        )
+        if not chats and sess.client is not None:
+            fetch = getattr(sess.client, "fetch_chats", None)
+            if callable(fetch):
+                try:
+                    chats = list(await fetch() or [])
+                except Exception:
+                    log.exception("fetch_chats failed")
+                else:
+                    log.info("fetch_chats returned %s chats", len(chats))
 
-        # async generator protocol
-        return
-        yield  # type: ignore[misc]
+        yielded = 0
+        for user in address_book:
+            contact = await self._friend(int_or_none(user), seen, me)
+            if contact is not None:
+                yielded += 1
+                yield contact
+
+        for chat in chats:
+            contact = await self._friend(dialog_peer_id(chat, me), seen, me)
+            if contact is not None:
+                yielded += 1
+                yield contact
+
+        log.info("roster fill yielded %s contacts", yielded)
+
+    async def _friend(
+        self, uid: int | None, seen: set[int], me: int | None
+    ) -> Contact | None:
+        if uid is None or uid <= 0 or uid in seen or (me is not None and uid == me):
+            return None
+        seen.add(uid)
+        contact = await self.by_legacy_id(str(uid))
+        contact.is_friend = True
+        if contact.name:
+            log.info("roster name jid=%s name=%s", contact.jid.bare, contact.name)
+            await contact.add_to_roster(force=True)
+            if contact.added_to_roster:
+                contact.xmpp.pubsub.broadcast_nick(
+                    contact.session.user_jid,
+                    contact.jid.bare,
+                    contact.name,
+                )
+        return contact

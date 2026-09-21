@@ -1,5 +1,6 @@
 from slidgemax.util import (
     dialog_chat_id,
+    dialog_peer_id,
     display_name,
     int_or_none,
     normalize_phone,
@@ -39,3 +40,15 @@ def test_display_name() -> None:
     assert display_name(u) == "Ada Lovelace"
     u2 = U(id=99)
     assert "MAX" in display_name(u2)
+
+
+def test_dialog_peer_id() -> None:
+    class Chat:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    me, peer = 10, 25
+    dialog = Chat(type="DIALOG", id=dialog_chat_id(me, peer), owner=me, participants={me: 1, peer: 1})
+    assert dialog_peer_id(dialog, me) == peer
+    assert dialog_peer_id(Chat(type="CHAT", id=1, owner=me, participants={me: 1, 3: 1, 4: 1}), me) is None
+    assert dialog_peer_id(Chat(type="DIALOG", id=dialog_chat_id(me, peer), owner=me), me) == peer

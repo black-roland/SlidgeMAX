@@ -62,6 +62,35 @@ def dialog_chat_id(first_user_id: int, second_user_id: int) -> int:
     return first_user_id ^ second_user_id
 
 
+def dialog_peer_id(chat: Any, me_id: int | None) -> int | None:
+    """Return the other user in a 1:1 MAX dialog, or None for groups/channels."""
+    raw_type = getattr(chat, "type", None)
+    chat_type = str(getattr(raw_type, "value", raw_type) or "").upper()
+    if chat_type != "DIALOG":
+        return None
+
+    participants = getattr(chat, "participants", None) or {}
+    others: list[int] = []
+    if isinstance(participants, dict):
+        for key in participants:
+            uid = int_or_none(key)
+            if uid is None or uid <= 0 or uid == me_id:
+                continue
+            others.append(uid)
+    if len(others) == 1:
+        return others[0]
+    if len(others) > 1:
+        return None
+
+    chat_id = int_or_none(getattr(chat, "id", None))
+    if chat_id is None or me_id is None:
+        return None
+    peer = chat_id ^ me_id
+    if peer <= 0 or peer == me_id:
+        return None
+    return peer
+
+
 def display_name(user: Any, fallback: str | None = None) -> str:
     if user is None:
         return fallback or "MAX user"

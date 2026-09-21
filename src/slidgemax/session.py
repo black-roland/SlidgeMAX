@@ -150,8 +150,6 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
             self._me_id = int_or_none(getattr(c, "me", None))
             self._ready.set()
             log.info("MAX connected for %s (id=%s)", self.user.jid.bare, self._me_id)
-            # Trigger roster fill etc.
-            await self.contacts.fill()
 
         @client.on_message()
         async def _on_msg(message: Any, c: Any) -> None:
