@@ -1,0 +1,10 @@
+header:
+  license:
+    spdx-id: Apache-2.0
+    copyright-owner: "@black-roland"
+
+  paths:
+    - "src/max_transport/**/*.py"
+    - "tests/**/*.py"
+
+  comment: on-failure

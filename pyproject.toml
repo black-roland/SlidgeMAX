@@ -5,7 +5,7 @@ description = "XMPP external component that bridges MAX messenger (Prosody-compa
 readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
-authors = [{ name = "MAX Transport" }]
+authors = [{ name = "Black Roland" }]
 keywords = ["xmpp", "max", "prosody", "gateway", "transport", "pymax"]
 dependencies = [
     "maxapi-python>=2.4.1",
