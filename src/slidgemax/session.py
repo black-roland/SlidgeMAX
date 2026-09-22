@@ -23,8 +23,6 @@ from slidge import BaseSession
 from slidge.core import config as slidge_config
 
 if TYPE_CHECKING:
-    from slidge.group.bookmarks import LegacyBookmarks
-
     from .gateway import Gateway
 
 
@@ -39,17 +37,14 @@ from slidge.group.bookmarks import LegacyBookmarks as _BaseBookmarks  # noqa: E4
 class _DummyBookmarks(_BaseBookmarks[_DummyMUC]):  # type: ignore[type-arg]
     pass
 
-from .auth import QueuePasswordProvider, QueueSmsProvider
 from .contact import Roster
 from .util import (
     dialog_chat_id,
-    display_name,
     int_or_none,
     session_dirname,
     is_call_attachment,
     is_text_attachment_only,
     looks_like_incoming_call,
-    opcode_name,
     parse_call_info,
     payload_as_dict,
     sender_id,
@@ -62,15 +57,7 @@ def _extra_config() -> Any:
     from pymax import ExtraConfig
 
     # Slidge sessions are long-lived; let PyMax reconnect.
-    kwargs: dict[str, Any] = {
-        "reconnect": True,
-        "reconnect_delay": 3.0,
-    }
-    try:
-        return ExtraConfig(**kwargs)
-    except TypeError:
-        kwargs.pop("device_type", None)
-        return ExtraConfig(**kwargs)
+    return ExtraConfig(reconnect=True, reconnect_delay=30.0)
 
 
 class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
@@ -98,7 +85,7 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         if self._me_id is not None:
             return self._me_id
         if self.client is not None:
-            self._me_id = int_or_none(getattr(self.client, "me", None))
+            self._me_id = int_or_none(self.client.me)
         return self._me_id
 
     async def login(self) -> str | None:
@@ -106,7 +93,7 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         Restore / create PyMax Client from stored legacy_module_data (phone) and session files.
         """
         phone = None
-        data = getattr(self.user, "legacy_module_data", None) or {}
+        data = self.user.legacy_module_data or {}
         if isinstance(data, dict):
             phone = data.get("phone")
         if not phone:
@@ -152,16 +139,12 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         }
         # No providers here: this is a restored session login. If token missing, PyMax will re-SMS but we have no provider -> will fail.
         # For re-auth, user should unregister+register.
-        try:
-            return Client(**kwargs)
-        except TypeError:
-            # older pymax
-            return Client(phone=phone, work_dir=str(self.work_dir), session_name="session.db")
+        return Client(**kwargs)
 
     def _attach_handlers(self, client: Any) -> None:
         @client.on_start()
         async def _on_start(c: Any) -> None:
-            self._me_id = int_or_none(getattr(c, "me", None))
+            self._me_id = int_or_none(c.me)
             self._ready.set()
             log.info("MAX connected for %s (id=%s)", self.user.jid.bare, self._me_id)
 
@@ -169,20 +152,16 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         async def _on_msg(message: Any, c: Any) -> None:
             await self._handle_incoming(message)
 
-        try:
-
-            @client.on_message_edit()
-            async def _on_edit(message: Any, c: Any) -> None:
-                await self._handle_incoming_edit(message)
-        except Exception:
-            log.debug("on_message_edit not available")
+        @client.on_message_edit()
+        async def _on_edit(message: Any, c: Any) -> None:
+            await self._handle_incoming_edit(message)
 
         @client.on_raw()
         async def _on_raw(frame: Any, c: Any) -> None:
-            if not getattr(self.xmpp, "call_notifications", True):
+            if not self.xmpp.call_notifications:
                 return
-            op = getattr(frame, "opcode", None)
-            pl = payload_as_dict(getattr(frame, "payload", None))
+            op = frame.opcode
+            pl = payload_as_dict(frame.payload)
             if looks_like_incoming_call(op, pl):
                 info = parse_call_info(pl)
                 await self._notify_call(info, None)
@@ -195,10 +174,6 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
             raise
         except Exception as exc:  # noqa: BLE001
             log.exception("MAX client error for %s: %s", self.user.jid.bare, exc)
-        finally:
-            if not self._ready.is_set():
-                # mark somehow
-                pass
 
     async def _handle_incoming(self, message: Any) -> None:
         me = self.me_id
@@ -216,23 +191,20 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
             await contact.update_info()
             self._pushed.add(peer)
 
-        body = getattr(message, "text", None)
+        body = message.text
         if not body:
-            if getattr(self.xmpp, "placeholder_unsupported", True) and not is_text_attachment_only(message):
-                body = getattr(self.xmpp, "unsupported_text", "Unsupported MAX content (not bridged).")
+            if self.xmpp.placeholder_unsupported and not is_text_attachment_only(message):
+                body = self.xmpp.unsupported_text
             else:
                 return
 
         # call detection via attachment
-        for att in getattr(message, "attaches", None) or []:
+        for att in message.attaches:
             if is_call_attachment(att):
                 await self._notify_call({}, message)
                 return
 
-        max_id = int_or_none(getattr(message, "id", None))
-        # For corrections from legacy, Slidge supports contact.correct(legacy_msg_id, text)
-        # We send as normal; if this message is itself a correction we will handle in _handle_incoming_edit
-        contact.send_text(str(body), legacy_msg_id=str(max_id) if max_id else None)
+        contact.send_text(str(body), legacy_msg_id=str(message.id))
 
     async def _handle_incoming_edit(self, message: Any) -> None:
         me = self.me_id
@@ -243,14 +215,11 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         if peer is None:
             return
         contact = await self.contacts.by_legacy_id(str(peer))
-        body = getattr(message, "text", None) or ""
-        max_id = int_or_none(getattr(message, "id", None))
-        if max_id is not None:
-            contact.correct(str(max_id), str(body))
+        contact.correct(str(message.id), message.text or "")
 
     def _resolve_peer(self, message: Any) -> int | None:
         me = self.me_id
-        chat_id = int_or_none(getattr(message, "chat_id", None))
+        chat_id = message.chat_id
         sid = sender_id(message)
         if chat_id is not None and me is not None:
             # 1:1 chat id is me ^ peer
@@ -265,7 +234,7 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         return None
 
     async def _notify_call(self, info: dict[str, Any], message: Any | None) -> None:
-        if not getattr(self.xmpp, "call_notifications", True):
+        if not self.xmpp.call_notifications:
             return
         caller = int_or_none(info.get("caller_id"))
         if caller is None and message is not None:
@@ -279,13 +248,6 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         contact = await self.contacts.by_legacy_id(str(caller))
         contact.send_text(text)
 
-    # --- outgoing from XMPP ---
-
-    async def on_text(self, chat: Any, text: str) -> str | None:  # not always called; prefer Contact
-        # Fallback path
-        return None
-
-    # Called via Contact.on_message
     async def send_text(self, peer_id: int, text: str) -> Any:
         client = self.client
         if client is None:
@@ -309,41 +271,20 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         c = self.client
         if c is None:
             return []
-        return [x for x in (getattr(c, "contacts", None) or []) if x]
-
-    def dialogs_list(self) -> list[Any]:
-        c = self.client
-        if c is None:
-            return []
-        return list(getattr(c, "dialogs", None) or [])
+        return [x for x in c.contacts if x]
 
     def chats_list(self) -> list[Any]:
         c = self.client
         if c is None:
             return []
-        return list(getattr(c, "chats", None) or [])
+        return list(c.chats or [])
 
     async def lookup_user(self, user_id: int) -> Any | None:
         c = self.client
         if c is None:
             return None
-        getter = getattr(c, "get_user", None)
-        if not callable(getter):
-            return None
         try:
-            return await getter(user_id)
-        except Exception:
-            return None
-
-    async def search_by_phone(self, phone: str) -> Any | None:
-        c = self.client
-        if c is None:
-            return None
-        fn = getattr(c, "search_by_phone", None)
-        if not callable(fn):
-            return None
-        try:
-            return await fn(phone)
+            return await c.get_user(user_id)
         except Exception:
             return None
 
@@ -356,16 +297,10 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
         if task:
             task.cancel()
         if client:
-            for name in ("stop", "close", "disconnect"):
-                m = getattr(client, name, None)
-                if callable(m):
-                    try:
-                        res = m()
-                        if asyncio.iscoroutine(res):
-                            await res
-                    except Exception:
-                        pass
-                    break
+            try:
+                await client.stop()
+            except Exception:
+                log.debug("failed to stop MAX client", exc_info=True)
         if task:
             try:
                 await task

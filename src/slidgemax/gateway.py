@@ -30,7 +30,7 @@ from slidge.db import GatewayUser
 
 from .auth import QueuePasswordProvider, QueueSmsProvider
 from .session import Session
-from .util import display_name, int_or_none, normalize_phone, session_dirname
+from .util import int_or_none, normalize_phone, session_dirname
 
 log = logging.getLogger("slidgemax.gateway")
 
@@ -56,7 +56,6 @@ class AuthAttempt:
         self.failed = asyncio.Event()
         self.error: str | None = None
         self.max_user_id: int | None = None
-        self.max_name: str | None = None
         self.sms_done = False
 
 
@@ -161,7 +160,7 @@ class Gateway(BaseGateway[Session]):
     @property
     def sessions_dir(self) -> Path:
         if self._sessions_dir is None:
-            base = getattr(slidge_config, "HOME_DIR", None) or Path("/tmp/slidgemax")
+            base = slidge_config.HOME_DIR
             self._sessions_dir = Path(base) / "max-sessions"
             self._sessions_dir.mkdir(parents=True, exist_ok=True)
         return self._sessions_dir
@@ -195,7 +194,7 @@ class Gateway(BaseGateway[Session]):
             "registration started jid=%s phone=%s work_dir=%s",
             bare,
             phone,
-            getattr(client, "work_dir", None),
+            client.work_dir,
         )
 
         async def _runner() -> None:
@@ -341,8 +340,7 @@ class Gateway(BaseGateway[Session]):
         async def _on_start(c: Any) -> None:
             for att in list(self._pending.values()):
                 if att.client is c or att.phone == phone:
-                    att.max_user_id = int_or_none(getattr(c, "me", None))
-                    att.max_name = display_name(getattr(c, "me", None))
+                    att.max_user_id = int_or_none(c.me)
                     att.ready.set()
                     break
 
@@ -353,17 +351,10 @@ class Gateway(BaseGateway[Session]):
         attempt.client = None
         task = attempt.task
         if client is not None:
-            for name in ("stop", "close"):
-                method = getattr(client, name, None)
-                if not callable(method):
-                    continue
-                try:
-                    result = method()
-                    if asyncio.iscoroutine(result):
-                        await result
-                except Exception:
-                    log.debug("failed to stop registration client", exc_info=True)
-                break
+            try:
+                await client.stop()
+            except Exception:
+                log.debug("failed to stop registration client", exc_info=True)
         if task is not None and not task.done():
             task.cancel()
             try:

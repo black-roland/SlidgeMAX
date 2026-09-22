@@ -40,10 +40,8 @@ class Contact(LegacyContact):
         if uid is None:
             return
         user = await self.session.lookup_user(uid)
-        if user is None:
-            cached = getattr(self.session.client, "get_cached_user", None)
-            if callable(cached):
-                user = cached(uid)
+        if user is None and self.session.client is not None:
+            user = self.session.client.get_cached_user(uid)
         self.name = display_name(user, fallback=f"MAX {uid}")
         self.is_friend = True
 
@@ -64,7 +62,7 @@ class Contact(LegacyContact):
         if not body.strip():
             return None
 
-        replace = getattr(message, "replace", None)
+        replace = message.replace
         if replace:
             try:
                 max_msg_id = int(replace)
@@ -76,8 +74,7 @@ class Contact(LegacyContact):
                 log.debug("could not interpret replace id as MAX id", exc_info=True)
 
         sent = await self.session.send_text(int(self.legacy_id), body)
-        mid = int_or_none(getattr(sent, "id", None))
-        return str(mid) if mid is not None else None
+        return str(sent.id)
 
 
 class Roster(LegacyRoster[Contact]):
@@ -115,14 +112,12 @@ class Roster(LegacyRoster[Contact]):
             len(chats),
         )
         if not chats and sess.client is not None:
-            fetch = getattr(sess.client, "fetch_chats", None)
-            if callable(fetch):
-                try:
-                    chats = list(await fetch() or [])
-                except Exception:
-                    log.exception("fetch_chats failed")
-                else:
-                    log.info("fetch_chats returned %s chats", len(chats))
+            try:
+                chats = list(await sess.client.fetch_chats())
+            except Exception:
+                log.exception("fetch_chats failed")
+            else:
+                log.info("fetch_chats returned %s chats", len(chats))
 
         yielded = 0
         for user in address_book:
