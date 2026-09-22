@@ -161,7 +161,7 @@ class Gateway(BaseGateway[Session]):
     def sessions_dir(self) -> Path:
         if self._sessions_dir is None:
             base = slidge_config.HOME_DIR
-            self._sessions_dir = Path(base) / "max-sessions"
+            self._sessions_dir = Path(base) / "max_sessions"
             self._sessions_dir.mkdir(parents=True, exist_ok=True)
         return self._sessions_dir
 

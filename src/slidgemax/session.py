@@ -77,7 +77,7 @@ class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
 
         # Where PyMax stores its session sqlite
         safe = session_dirname(str(user.jid.bare))
-        self.work_dir: Path = Path(slidge_config.HOME_DIR) / "max-sessions" / safe
+        self.work_dir: Path = Path(slidge_config.HOME_DIR) / "max_sessions" / safe
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     @property

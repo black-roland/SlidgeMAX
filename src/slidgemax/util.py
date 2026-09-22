@@ -21,7 +21,7 @@ _PHONE_STRIP = re.compile(r"[\s\-().]")
 
 
 def session_dirname(key: str) -> str:
-    """Stable directory name for a JID or phone under max-sessions/."""
+    """Stable directory name for a JID or phone under max_sessions/."""
     return re.sub(r"[^a-zA-Z0-9._-]+", "_", key.replace("@", "_at_")) or "user"
 
 

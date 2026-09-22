@@ -103,7 +103,7 @@ Slidge options apply (`--home-dir`, logging, etc.).
 
 Additional runtime flags are not exposed yet; defaults are sensible (reconnect on, ignore groups, call notifications on, placeholder for unsupported media).
 
-PyMax sessions are stored under `$HOME_DIR/max-sessions/`.
+PyMax sessions are stored under `$HOME_DIR/max_sessions/`.
 
 ## Limitations (as designed)
 
