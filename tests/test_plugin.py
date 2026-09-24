@@ -5,6 +5,7 @@ from slidge.group import LegacyBookmarks
 
 from slidgemax import Gateway, Session, __version__
 from slidgemax.contact import Contact, Roster
+from slidgemax.session import max_extra_config
 from slidgemax.util import normalize_phone
 
 
@@ -37,3 +38,7 @@ def test_contact_disco_flags() -> None:
 
 def test_phone_used_by_registration() -> None:
     assert normalize_phone("89991234567") == "+79991234567"
+
+
+def test_login_requests_full_contact_sync() -> None:
+    assert max_extra_config().sync.contacts_sync == -1

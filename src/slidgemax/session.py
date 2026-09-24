@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pymax import Client, ExtraConfig
+from pymax import Client, ExtraConfig, SyncOverrides
 from pymax.api.session.enums import DeviceType
 from pymax.protocol.models import InboundFrame
 from pymax.types.domain.attachments.call import CallAttachment
@@ -85,6 +85,7 @@ def max_extra_config() -> ExtraConfig:
         persist_session=True,
         relogin=True,
         telemetry=False,
+        sync=SyncOverrides(contacts_sync=-1),
     )
 
 
@@ -407,7 +408,6 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
         if peer is None:
             return
         contact = await self._contact(peer)
-        contact.is_friend = True
 
         carbon = self.me_id is not None and sender_id(message) == self.me_id
         when = message_timestamp(message)
@@ -458,7 +458,6 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
         if caller is None:
             return
         contact = await self._contact(int(caller))
-        contact.is_friend = True
         await self._notify_call(contact, info)
 
     async def _notify_call(

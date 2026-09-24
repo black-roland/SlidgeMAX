@@ -148,5 +148,4 @@ class Roster(LegacyRoster[Contact]):
                 continue
             seen.add(key)
             contact = await self.by_legacy_id(key)
-            contact.is_friend = True
             yield contact
