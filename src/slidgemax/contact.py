@@ -22,11 +22,14 @@ from typing import TYPE_CHECKING
 
 from slidge.contact import LegacyContact, LegacyRoster
 from slidge.util.types import ContactMessage
+from slixmpp import JID
 from slixmpp.exceptions import XMPPError
 
-from .util import display_name, user_id
+from . import config
+from .util import display_name, map_presence, user_id
 
 if TYPE_CHECKING:
+    from pymax.types.domain.presence import Presence
     from pymax.types.domain.user import User
 
     from .session import Session
@@ -68,7 +71,23 @@ class Contact(LegacyContact):
             )
         elif not self.name:
             self.name = f"MAX {ident}"
-        self.online()
+        self.apply_presence()
+
+    def apply_presence(self, presence: Presence | None = None) -> None:
+        if not config.PRESENCE:
+            return
+        if presence is None:
+            presence = self.session.cached_presence(int(self.legacy_id))
+        if presence is None:
+            return
+        mapped = map_presence(presence.status, presence.seen)
+        if mapped is None:
+            return
+        show, last_seen = mapped
+        if show == "online":
+            self.online(last_seen=last_seen)
+        else:
+            self.away(last_seen=last_seen)
 
     async def on_message(self, message: ContactMessage) -> str | None:
         if message.attachments:
@@ -121,6 +140,11 @@ class Roster(LegacyRoster[Contact]):
         if value <= 0:
             raise XMPPError("bad-request", "MAX user id must be a positive integer.")
         return str(value)
+
+    def by_legacy_id_if_exists(self, legacy_id: str) -> Contact | None:
+        return self.by_jid_only_if_exists(
+            JID(f"{legacy_id}@{self.session.xmpp.boundjid.bare}")
+        )
 
     async def fill(self) -> AsyncIterator[Contact]:
         session = self.session

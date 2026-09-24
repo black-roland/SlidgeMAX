@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import inspect
+
 from slidge.command.register import RegistrationType
 from slidge.group import LegacyBookmarks
 
 from slidgemax import Gateway, Session, __version__
+from slidgemax import config
 from slidgemax.contact import Contact, Roster
 from slidgemax.session import max_extra_config
 from slidgemax.util import normalize_phone
@@ -27,6 +30,12 @@ def test_gateway_identity() -> None:
     vars_ = {field.var for field in Gateway.REGISTRATION_FIELDS}
     assert vars_ == {"phone", "password"}
     assert [field.var for field in Gateway.SEARCH_FIELDS] == ["query"]
+
+
+def test_contact_does_not_force_online() -> None:
+    assert "self.online()" not in inspect.getsource(Contact.update_info)
+    assert not getattr(Contact, "ONLINE", False)
+    assert config.PRESENCE is True
 
 
 def test_contact_disco_flags() -> None:

@@ -12,12 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared helpers: phones, names, MAX ids, call/group detection."""
+"""Shared helpers: phones, names, MAX ids, call/group detection, presence."""
 
 from __future__ import annotations
 
 import re
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from pymax.protocol.enums import Opcode
 from pymax.types.domain.attachments.call import CallAttachment
@@ -283,10 +284,40 @@ def is_text_attachment_only(message: Message) -> bool:
     return all(attachment_type_name(a) in {"", "CONTROL", "NONE"} for a in attaches)
 
 
+_PRESENCE_MS = 1_000_000_000_000
+PresenceShow = Literal["online", "away"]
+
+
+def presence_seen(seen: int | None) -> datetime | None:
+    """Convert a MAX presence timestamp to UTC, or None if it is not usable."""
+    if seen is None or seen <= 0:
+        return None
+    seconds = seen / 1000 if seen >= _PRESENCE_MS else float(seen)
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def map_presence(
+    status: int | None, seen: int | None
+) -> tuple[PresenceShow, datetime | None] | None:
+    """Map a MAX presence push to an XMPP show and last-seen stamp.
+
+    Status ``1`` is online. A usable ``seen`` without that status, including an
+    unknown status code, is away. Empty or non-positive fields are ignored so a
+    previous status is not cleared.
+    """
+    last_seen = presence_seen(seen)
+    if status == 1:
+        return ("online", last_seen)
+    if last_seen is None:
+        return None
+    return ("away", last_seen)
+
+
 def message_timestamp(message: Message):
     """Return a timezone-aware datetime, or None if MAX sent nothing useful."""
-    from datetime import UTC, datetime
-
     raw = message.time
     if not raw:
         return None

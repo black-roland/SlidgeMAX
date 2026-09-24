@@ -23,12 +23,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pymax import Client, ExtraConfig, SyncOverrides
+from pymax import Client, ExtraConfig, PresenceEvent, SyncOverrides
 from pymax.api.session.enums import DeviceType
 from pymax.protocol.models import InboundFrame
 from pymax.types.domain.attachments.call import CallAttachment
 from pymax.types.domain.chat import Chat
 from pymax.types.domain.message import Message
+from pymax.types.domain.presence import Presence
 from pymax.types.domain.user import User
 from slidge import BaseSession, global_config
 from slidge.command import FormField, SearchResult
@@ -48,6 +49,7 @@ from .util import (
     is_group_message,
     is_text_attachment_only,
     looks_like_incoming_call,
+    map_presence,
     message_timestamp,
     normalize_phone,
     parse_call_info,
@@ -120,6 +122,8 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
         self.client: Client | None = None
         self._me_id: int | None = None
         self._bound = False
+        self._presence: dict[int, Presence] = {}
+        self._unknown_presence: set[int] = set()
 
     @property
     def phone(self) -> str:
@@ -171,6 +175,12 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
             # _bind_client wires on_start to set logged-in state via an Event we wait on.
             await self._wait_client_ready()
 
+        if config.PRESENCE and self.client is not None:
+            try:
+                self.client.set_presence(online=True)
+            except Exception:
+                self.log.warning("set_presence(online=True) failed", exc_info=True)
+
         ident = self.me_id
         if ident is not None:
             self.contacts.user_legacy_id = str(ident)
@@ -213,6 +223,15 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
             self._me_id = user_id(c.me)
             self._client_ready.set()
             self.log.info("MAX session ready (id=%s)", self._me_id)
+
+        if config.PRESENCE:
+
+            @client.on_presence()
+            async def on_presence(event: PresenceEvent, _c: Client) -> None:
+                try:
+                    self._on_max_presence(event)
+                except Exception:
+                    self.log.exception("Error handling MAX presence")
 
         @client.on_message()
         async def on_message(message: Message, _c: Client) -> None:
@@ -399,6 +418,31 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
                 }
             ],
         )
+
+    def cached_presence(self, user_id_: int) -> Presence | None:
+        return self._presence.get(user_id_)
+
+    def _on_max_presence(self, event: PresenceEvent) -> None:
+        if not config.PRESENCE:
+            return
+        uid = event.user_id
+        if not isinstance(uid, int) or uid <= 0 or uid == self.me_id:
+            return
+        presence = event.presence
+        status = presence.status
+        if (
+            isinstance(status, int)
+            and status != 1
+            and status not in self._unknown_presence
+        ):
+            self._unknown_presence.add(status)
+            self.log.debug("Unknown MAX presence status %s", status)
+        if map_presence(status, presence.seen) is None:
+            return
+        self._presence[uid] = presence
+        contact = self.contacts.by_legacy_id_if_exists(str(uid))
+        if contact is not None:
+            contact.apply_presence(presence)
 
     async def _contact(self, peer_id: int):
         return await self.contacts.by_legacy_id(str(peer_id))

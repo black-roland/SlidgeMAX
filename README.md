@@ -65,6 +65,10 @@ uv run slidge \
 
 Contacts appear as `123456@max.example.org`.
 
+## Presence
+
+Presence and last seen are push-only. A contact stays unmarked until MAX sends a presence event; the gateway does not mark the roster available. Status `1` is online. A last-seen time without that status, and any unknown status code that includes a timestamp, is shown as away, not online. There is no presence snapshot at login. Disable with `--presence`.
+
 ## Prosody example
 
 ```
@@ -108,7 +112,8 @@ PyMax sessions are stored under `$HOME_DIR/max_sessions/`.
 ## Limitations (as designed)
 
 - 1:1 only (groups out of scope)
-- Text, edits, and call notifications only
+- Text, edits, call notifications, and push-only presence / last seen
+- Unknown MAX presence codes are away when a last-seen time is present, never online
 - No files, voice, stickers, reactions, rich cards, avatars
 - PyMax is unofficial
 

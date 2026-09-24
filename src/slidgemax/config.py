@@ -39,6 +39,13 @@ IGNORE_GROUPS__DOC = (
     "Drop group and channel messages. Groups are out of scope for this gateway."
 )
 
+PRESENCE: bool = True
+PRESENCE__DOC = (
+    "Bridge MAX presence and last seen. Contacts stay unmarked until a presence "
+    "push arrives. Pass --presence to disable (Slidge inverts boolean flags whose "
+    "default is true)."
+)
+
 CALL_NOTIFICATIONS: bool = True
 CALL_NOTIFICATIONS__DOC = (
     "Turn incoming MAX calls into a plain-text XMPP notice. Calls themselves are not bridged."
