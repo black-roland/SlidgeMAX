@@ -12,14 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-SlidgeMAX — XMPP gateway for MAX messenger using Slidge + PyMax.
-"""
+"""Slidge-based XMPP gateway for the MAX messenger."""
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from .gateway import Gateway
+from .session import Session
 
-__all__ = ["Gateway", "__version__"]
+__all__ = ["Gateway", "Session", "__version__", "main"]
+
+
+def main() -> None:
+    from slidge import entrypoint
+
+    entrypoint("slidgemax")

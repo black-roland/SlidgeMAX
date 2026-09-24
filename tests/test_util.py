@@ -1,54 +1,148 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+from pymax.protocol.enums import Opcode
+from pymax.types.domain.attachments.call import CallAttachment
+from pymax.types.domain.attachments.enums import CallType, HangupType
+from pymax.types.domain.chat import Chat
+from pymax.types.domain.enums import ChatType
+from pymax.types.domain.message import Message
+from pymax.types.domain.name import Name
+from pymax.types.domain.profile import Profile
+from pymax.types.domain.user import User
+
 from slidgemax.util import (
     dialog_chat_id,
+    dialog_peer_from_chat,
     dialog_peer_id,
     display_name,
-    int_or_none,
+    is_call_attachment,
+    is_group_chat,
+    is_group_message,
+    is_text_attachment_only,
+    looks_like_incoming_call,
+    message_timestamp,
     normalize_phone,
+    parse_call_info,
+    safe_filename,
+    user_id,
 )
 
 
-def test_normalize_phone() -> None:
-    assert normalize_phone("8 (999) 000-00-00") == "+79990000000"
+def test_normalize_phone_e164() -> None:
+    assert normalize_phone("+79990000000") == "+79990000000"
+    assert normalize_phone("89990000000") == "+79990000000"
     assert normalize_phone("79990000000") == "+79990000000"
-    assert normalize_phone("+44 7700 900123") == "+447700900123"
-    assert normalize_phone("00447700900123") == "+447700900123"
+    assert normalize_phone("00 7 999 000-00-00") == "+79990000000"
+    assert normalize_phone("+1 (202) 555-0100") == "+12025550100"
 
 
-def test_int_or_none() -> None:
-    assert int_or_none(42) == 42
-    assert int_or_none("123") == 123
-    assert int_or_none(None) is None
+def test_normalize_phone_rejects_garbage() -> None:
+    with pytest.raises(ValueError):
+        normalize_phone("")
+    with pytest.raises(ValueError):
+        normalize_phone("abc")
+    with pytest.raises(ValueError):
+        normalize_phone("+12")
+
+
+def test_safe_filename() -> None:
+    assert "at" in safe_filename("User@Example.ORG/res")
+    assert "@" not in safe_filename("a@b")
 
 
 def test_dialog_xor() -> None:
-    me, peer = 10, 25
-    chat = dialog_chat_id(me, peer)
-    assert (chat ^ me) == peer
-    assert (chat ^ peer) == me
+    me, peer = 10, 3
+    chat_id = dialog_chat_id(me, peer)
+    assert chat_id == me ^ peer
+    assert dialog_peer_id(chat_id, me) == peer
+
+
+def test_user_id_from_profile_and_user() -> None:
+    user = User(id=42, names=[Name(name="Ada")])
+    assert user_id(user) == 42
+    assert user_id(Profile(contact=user)) == 42
+    assert user_id(42) == 42
+    assert user_id(None) is None
 
 
 def test_display_name() -> None:
-    class N:
-        def __init__(self, **kw):
-            self.__dict__.update(kw)
-
-    class U:
-        def __init__(self, **kw):
-            self.__dict__.update(kw)
-
-    u = U(names=[N(first_name="Ada", last_name="Lovelace")])
-    assert display_name(u) == "Ada Lovelace"
-    u2 = U(id=99)
-    assert "MAX" in display_name(u2)
+    user = User(id=7, names=[Name(first_name="Ada", last_name="Lovelace")])
+    assert display_name(user) == "Ada Lovelace"
+    assert display_name(User(id=7, names=[Name(name="Ada")])) == "Ada"
+    assert display_name(None, fallback="x") == "x"
+    assert display_name(User(id=9, names=[])) == "MAX 9"
 
 
-def test_dialog_peer_id() -> None:
-    class Chat:
-        def __init__(self, **kw):
-            self.__dict__.update(kw)
+def _chat(**kwargs: object) -> Chat:
+    defaults = dict(
+        id=1,
+        type=ChatType.DIALOG,
+        status="ACTIVE",
+        owner=2,
+        last_event_time=0,
+        created=0,
+    )
+    defaults.update(kwargs)
+    return Chat(**defaults)  # type: ignore[arg-type]
 
-    me, peer = 10, 25
-    dialog = Chat(type="DIALOG", id=dialog_chat_id(me, peer), owner=me, participants={me: 1, peer: 1})
-    assert dialog_peer_id(dialog, me) == peer
-    assert dialog_peer_id(Chat(type="CHAT", id=1, owner=me, participants={me: 1, 3: 1, 4: 1}), me) is None
-    assert dialog_peer_id(Chat(type="DIALOG", id=dialog_chat_id(me, peer), owner=me), me) == peer
+
+def test_is_group_chat() -> None:
+    assert not is_group_chat(_chat(type=ChatType.DIALOG))
+    assert is_group_chat(_chat(type=ChatType.CHAT))
+    assert is_group_chat(_chat(type=ChatType.CHANNEL))
+
+
+def test_dialog_peer_from_chat() -> None:
+    chat = _chat(id=10 ^ 3, type=ChatType.DIALOG, owner=3, participants={10: 0, 3: 0})
+    assert dialog_peer_from_chat(chat, 10) == 3
+    assert dialog_peer_from_chat(_chat(type=ChatType.CHAT, owner=3), 10) is None
+
+
+def test_is_group_message() -> None:
+    msg = Message(id=1, time=1, type="DIALOG", sender=3, chat_id=1, text="hi")
+    assert not is_group_message(msg)
+    assert is_group_message(Message(id=1, time=1, type="CHANNEL", text="x"))
+
+
+def test_looks_like_incoming_call() -> None:
+    assert looks_like_incoming_call(Opcode.NOTIF_CALL_START, {})
+    assert looks_like_incoming_call(137, {})
+    assert looks_like_incoming_call(0, {"incomingCall": {"callerId": 1}})
+    assert not looks_like_incoming_call(1, {})
+
+
+def test_parse_call_attachment() -> None:
+    attach = CallAttachment(
+        type="CALL",  # type: ignore[arg-type]
+        contact_ids=[99],
+        call_type=CallType.VIDEO,
+        hangup_type=HangupType.MISSED,
+    )
+    info = parse_call_info(attach)
+    assert info["caller_id"] == 99
+    assert info["video"] is True
+    assert info["hangup"] == "MISSED"
+    assert is_call_attachment(attach)
+
+
+def test_parse_call_payload() -> None:
+    info = parse_call_info({"callerId": 5, "isVideo": True, "name": "Ada"})
+    assert info["caller_id"] == 5
+    assert info["video"] is True
+    assert info["name"] == "Ada"
+
+
+def test_text_only_attachments() -> None:
+    msg = Message(id=1, time=1, type="DIALOG", text="hi", attaches=[])
+    assert is_text_attachment_only(msg)
+
+
+def test_message_timestamp_ms() -> None:
+    msg = Message(id=1, time=1_700_000_000_000, type="DIALOG", text="hi")
+    ts = message_timestamp(msg)
+    assert isinstance(ts, datetime)
+    assert ts.tzinfo == UTC
+    assert ts.year == 2023

@@ -12,143 +12,141 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Legacy contacts and the per-user roster."""
+
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import TYPE_CHECKING
 
-from slidge import LegacyContact, LegacyRoster
-from slidge.util.types import ContactMessage  # type: ignore
+from slidge.contact import LegacyContact, LegacyRoster
+from slidge.util.types import ContactMessage
+from slixmpp.exceptions import XMPPError
 
-from .util import dialog_peer_id, display_name, int_or_none
+from .util import display_name, user_id
 
 if TYPE_CHECKING:
+    from pymax.types.domain.user import User
+
     from .session import Session
 
-log = logging.getLogger("slidgemax.contact")
+log = logging.getLogger(__name__)
 
 
 class Contact(LegacyContact):
-    """
-    A MAX 1:1 contact.
-    """
+    """A MAX user presented as an XMPP contact ``<id>@gateway``."""
 
-    session: "Session"
+    session: Session
 
-    async def update_info(self) -> None:
-        uid = int_or_none(self.legacy_id)
-        if uid is None:
-            return
-        user = await self.session.lookup_user(uid)
-        if user is None and self.session.client is not None:
-            user = self.session.client.get_cached_user(uid)
-        self.name = display_name(user, fallback=f"MAX {uid}")
-        self.is_friend = True
+    AVATAR = False
+    RECEIPTS = False
+    MARKS = False
+    CHAT_STATES = False
+    UPLOAD = False
+    CORRECTION = True
+    REACTION = False
+    RETRACTION = True
+    REPLIES = False
 
-    def _send(self, stanza: Any, carbon: bool = False, nick: bool = False, **send_kwargs: Any) -> Any:
-        # Friends only get an XEP-0172 nick when nick=True. Gajim and Dino otherwise show the JID.
-        return super()._send(stanza, carbon=carbon, nick=bool(self.name) or nick, **send_kwargs)
-
-    async def backfill(self, after: Any) -> None:
-        """History sync is out of scope. Must not raise, or roster fill stops."""
-        return
-
-    async def on_message(self, message: ContactMessage) -> str | None:  # type: ignore[override]
-        """
-        XMPP user sent a message to this MAX contact.
-        Return the MAX message id (as str) so Slidge can track it for corrections.
-        """
-        body = message.body or ""
-        if not body.strip():
-            return None
-
-        replace = message.replace
-        if replace:
+    async def update_info(self, user: User | None = None) -> None:
+        session = self.session
+        ident = int(self.legacy_id)
+        if user is None and session.client is not None:
             try:
-                max_msg_id = int(replace)
-                chat_id = self.session.me_id ^ int(self.legacy_id) if self.session.me_id else None
-                if chat_id is not None:
-                    await self.session.edit_text(chat_id, max_msg_id, body)
-                    return str(max_msg_id)
+                user = await session.client.get_user(ident)
             except Exception:
-                log.debug("could not interpret replace id as MAX id", exc_info=True)
+                log.debug("get_user(%s) failed", ident, exc_info=True)
+                user = None
+        if user is not None:
+            self.name = display_name(user, fallback=f"MAX {ident}")
+            phone = getattr(user, "phone", None)
+            self.set_vcard(
+                full_name=self.name,
+                phone=str(phone) if phone else None,
+                note=f"MAX id {ident}",
+            )
+        elif not self.name:
+            self.name = f"MAX {ident}"
+        self.online()
 
-        sent = await self.session.send_text(int(self.legacy_id), body)
+    async def on_message(self, message: ContactMessage) -> str | None:
+        if message.attachments:
+            raise XMPPError(
+                "feature-not-implemented",
+                "This MAX gateway does not send files, stickers or other attachments.",
+            )
+        text = (message.body or "").strip()
+        if not text:
+            return None
+        peer = int(self.legacy_id)
+        if message.replace:
+            await self.session.edit_text(peer, int(message.replace), text)
+            return message.replace
+        sent = await self.session.send_text(peer, text)
         return str(sent.id)
+
+    async def on_sticker(self, sticker) -> str | None:  # noqa: ANN001
+        raise XMPPError(
+            "feature-not-implemented",
+            "Stickers are not bridged by this MAX gateway.",
+        )
+
+    async def on_retract(self, legacy_msg_id: str, thread: str | None) -> None:
+        await self.session.delete_text(int(self.legacy_id), int(legacy_msg_id))
+
+    async def on_friend_request(self, text: str = "") -> None:
+        await self.session.add_max_contact(int(self.legacy_id))
+        self.is_friend = True
+        await self.accept_friend_request()
+
+    async def on_friend_delete(self, text: str = "") -> None:
+        await self.session.remove_max_contact(int(self.legacy_id))
+        self.is_friend = False
+
+    async def on_friend_accept(self) -> None:
+        self.is_friend = True
 
 
 class Roster(LegacyRoster[Contact]):
-    """
-    Maps JID localpart (numeric string) <-> MAX user id (int).
-    """
-
-    session: "Session"
+    session: Session
 
     async def jid_username_to_legacy_id(self, jid_username: str) -> str:
-        if not jid_username or not jid_username.isdigit():
-            from slixmpp.exceptions import XMPPError
-
-            raise XMPPError("item-not-found", "Only numeric MAX user IDs are supported")
-        val = int(jid_username)
-        if val <= 0:
-            from slixmpp.exceptions import XMPPError
-
-            raise XMPPError("item-not-found", "MAX user ID must be positive")
-        return str(val)
-
-    async def legacy_id_to_jid_username(self, legacy_id: str) -> str:
-        return str(legacy_id)
+        if not jid_username.isdigit():
+            raise XMPPError(
+                "bad-request",
+                "MAX contact JIDs use numeric user IDs (for example 123456@gateway).",
+            )
+        value = int(jid_username)
+        if value <= 0:
+            raise XMPPError("bad-request", "MAX user id must be a positive integer.")
+        return str(value)
 
     async def fill(self) -> AsyncIterator[Contact]:
-        sess = self.session
-        seen: set[int] = set()
-        me = sess.me_id
-        address_book = sess.contacts_list()
-        chats = sess.chats_list()
-        log.info(
-            "filling roster me=%s address_book=%s chats=%s",
-            me,
-            len(address_book),
-            len(chats),
-        )
-        if not chats and sess.client is not None:
-            try:
-                chats = list(await sess.client.fetch_chats())
-            except Exception:
-                log.exception("fetch_chats failed")
-            else:
-                log.info("fetch_chats returned %s chats", len(chats))
+        session = self.session
+        seen: set[str] = set()
+        me = session.me_id
 
-        yielded = 0
-        for user in address_book:
-            contact = await self._friend(int_or_none(user), seen, me)
-            if contact is not None:
-                yielded += 1
-                yield contact
+        for user in session.max_contacts():
+            ident = user_id(user)
+            if ident is None or ident == me:
+                continue
+            key = str(ident)
+            if key in seen:
+                continue
+            seen.add(key)
+            contact = await self.by_legacy_id(key, user)
+            contact.is_friend = True
+            yield contact
 
-        for chat in chats:
-            contact = await self._friend(dialog_peer_id(chat, me), seen, me)
-            if contact is not None:
-                yielded += 1
-                yield contact
-
-        log.info("roster fill yielded %s contacts", yielded)
-
-    async def _friend(
-        self, uid: int | None, seen: set[int], me: int | None
-    ) -> Contact | None:
-        if uid is None or uid <= 0 or uid in seen or (me is not None and uid == me):
-            return None
-        seen.add(uid)
-        contact = await self.by_legacy_id(str(uid))
-        contact.is_friend = True
-        if contact.name:
-            log.info("roster name jid=%s name=%s", contact.jid.bare, contact.name)
-            await contact.add_to_roster(force=True)
-            if contact.added_to_roster:
-                contact.xmpp.pubsub.broadcast_nick(
-                    contact.session.user_jid,
-                    contact.jid.bare,
-                    contact.name,
-                )
-        return contact
+        for chat in session.max_chats():
+            peer = session.peer_from_chat(chat)
+            if peer is None or peer == me:
+                continue
+            key = str(peer)
+            if key in seen:
+                continue
+            seen.add(key)
+            contact = await self.by_legacy_id(key)
+            contact.is_friend = True
+            yield contact

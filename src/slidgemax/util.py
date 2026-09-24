@@ -12,17 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Shared helpers: phones, names, MAX ids, call/group detection."""
+
 from __future__ import annotations
 
 import re
 from typing import Any
 
+from pymax.protocol.enums import Opcode
+from pymax.types.domain.attachments.call import CallAttachment
+from pymax.types.domain.attachments.enums import AttachmentType, CallType, HangupType
+from pymax.types.domain.chat import Chat
+from pymax.types.domain.enums import ChatType
+from pymax.types.domain.message import Message
+from pymax.types.domain.profile import Profile
+from pymax.types.domain.user import User
+
 _PHONE_STRIP = re.compile(r"[\s\-().]")
+_UNSAFE_FILENAME = re.compile(r"[^a-zA-Z0-9._-]+")
 
-
-def session_dirname(key: str) -> str:
-    """Stable directory name for a JID or phone under max_sessions/."""
-    return re.sub(r"[^a-zA-Z0-9._-]+", "_", key.replace("@", "_at_")) or "user"
+INCOMING_CALL_OPCODE = int(Opcode.NOTIF_CALL_START)
 
 
 def normalize_phone(raw: str) -> str:
@@ -47,10 +56,14 @@ def normalize_phone(raw: str) -> str:
     return s
 
 
+def safe_filename(jid: str) -> str:
+    """Stable filesystem name for a bare JID."""
+    bare = (jid or "").split("/", 1)[0].strip().lower()
+    return _UNSAFE_FILENAME.sub("_", bare.replace("@", "_at_")) or "user"
+
+
 def int_or_none(value: Any) -> int | None:
-    if value is None or value is False:
-        return None
-    if isinstance(value, bool):
+    if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
         return value
@@ -67,8 +80,15 @@ def int_or_none(value: Any) -> int | None:
     return None
 
 
-def sender_id(message: Any) -> int | None:
-    return int_or_none(getattr(message, "sender", None))
+def user_id(value: Any) -> int | None:
+    """Extract a MAX user id from a User, Profile, or int-like value."""
+    if isinstance(value, Profile):
+        return int_or_none(value.contact)
+    return int_or_none(value)
+
+
+def sender_id(message: Message) -> int | None:
+    return int_or_none(message.sender)
 
 
 def dialog_chat_id(first_user_id: int, second_user_id: int) -> int:
@@ -76,48 +96,72 @@ def dialog_chat_id(first_user_id: int, second_user_id: int) -> int:
     return first_user_id ^ second_user_id
 
 
-def dialog_peer_id(chat: Any, me_id: int | None) -> int | None:
-    """Return the other user in a 1:1 MAX dialog, or None for groups/channels."""
-    raw_type = getattr(chat, "type", None)
-    chat_type = str(getattr(raw_type, "value", raw_type) or "").upper()
-    if chat_type != "DIALOG":
-        return None
+def dialog_peer_id(chat_id: int, me_id: int) -> int:
+    return chat_id ^ me_id
 
-    participants = getattr(chat, "participants", None) or {}
-    others: list[int] = []
-    if isinstance(participants, dict):
-        for key in participants:
-            uid = int_or_none(key)
-            if uid is None or uid <= 0 or uid == me_id:
-                continue
-            others.append(uid)
-    if len(others) == 1:
-        return others[0]
-    if len(others) > 1:
-        return None
 
-    chat_id = int_or_none(getattr(chat, "id", None))
-    if chat_id is None or me_id is None:
+def chat_type_name(chat: Any) -> str:
+    if chat is None:
+        return ""
+    t = getattr(chat, "type", None)
+    if t is None:
+        return ""
+    name = getattr(t, "name", None) or getattr(t, "value", None)
+    if name:
+        return str(name).upper()
+    return str(t).upper()
+
+
+def is_group_chat(chat: Any) -> bool:
+    if isinstance(chat, Chat):
+        t = chat.type
+        if t == ChatType.DIALOG or t == ChatType.DIALOG.value:
+            return False
+        if t in {ChatType.CHAT, ChatType.CHANNEL} or t in {
+            ChatType.CHAT.value,
+            ChatType.CHANNEL.value,
+        }:
+            return True
+    name = chat_type_name(chat)
+    if not name:
+        return False
+    if "DIALOG" in name:
+        return False
+    return "GROUP" in name or name == "CHAT" or "CHANNEL" in name
+
+
+def is_group_message(message: Message) -> bool:
+    kind = (message.type or "").upper()
+    return kind in {"CHAT", "CHANNEL", "GROUP"}
+
+
+def dialog_peer_from_chat(chat: Chat, me_id: int | None) -> int | None:
+    if is_group_chat(chat):
         return None
-    peer = chat_id ^ me_id
-    if peer <= 0 or peer == me_id:
-        return None
-    return peer
+    if chat.participants:
+        for uid in chat.participants:
+            if me_id is None or uid != me_id:
+                return int(uid)
+    owner = int_or_none(chat.owner)
+    if owner is not None and owner != me_id:
+        return owner
+    if me_id is not None:
+        return dialog_peer_id(chat.id, me_id)
+    return None
 
 
 def display_name(user: Any, fallback: str | None = None) -> str:
     if user is None:
         return fallback or "MAX user"
+    if isinstance(user, Profile):
+        user = user.contact
     names = getattr(user, "names", None) or []
     if names:
         n = names[0]
         full = getattr(n, "name", None)
         if full:
             return str(full)
-        parts = [
-            getattr(n, "first_name", None),
-            getattr(n, "last_name", None),
-        ]
+        parts = [getattr(n, "first_name", None), getattr(n, "last_name", None)]
         joined = " ".join(p for p in parts if p)
         if joined:
             return joined
@@ -125,34 +169,10 @@ def display_name(user: Any, fallback: str | None = None) -> str:
         val = getattr(user, attr, None)
         if val:
             return str(val)
-    ident = int_or_none(user)
+    ident = user_id(user)
     if ident is not None:
         return fallback or f"MAX {ident}"
     return fallback or "MAX user"
-
-
-def attachment_type_name(attach: Any) -> str:
-    t = getattr(attach, "type", None)
-    if t is not None:
-        name = getattr(t, "name", None) or str(t)
-        return str(name).upper()
-    return type(attach).__name__.upper()
-
-
-def is_call_attachment(attach: Any) -> bool:
-    name = attachment_type_name(attach)
-    return "CALL" in name
-
-
-def is_text_attachment_only(message: Any) -> bool:
-    attaches = list(getattr(message, "attaches", None) or [])
-    if not attaches:
-        return True
-    return all(attachment_type_name(a) in {"", "CONTROL", "NONE"} for a in attaches)
-
-
-# MAX protocol: NOTIF_INCOMING_CALL
-INCOMING_CALL_OPCODE = 137
 
 
 def payload_as_dict(payload: Any) -> dict[str, Any]:
@@ -163,61 +183,50 @@ def payload_as_dict(payload: Any) -> dict[str, Any]:
     dump = getattr(payload, "model_dump", None)
     if callable(dump):
         try:
-            return dump(by_alias=True)
+            dumped = dump(by_alias=True)
         except TypeError:
-            return dump()
-    as_dict = getattr(payload, "dict", None)
-    if callable(as_dict):
-        return as_dict()
+            dumped = dump()
+        if isinstance(dumped, dict):
+            return dumped
     extra = getattr(payload, "model_extra", None)
     if isinstance(extra, dict):
         return extra
     return {}
 
 
-def opcode_name(opcode: Any) -> str:
-    if opcode is None:
-        return ""
-    name = getattr(opcode, "name", None)
-    if name:
-        return str(name).upper()
-    value = getattr(opcode, "value", opcode)
-    return str(value).upper()
-
-
-def opcode_value(opcode: Any) -> int | None:
-    if opcode is None:
-        return None
-    if isinstance(opcode, int):
-        return opcode
-    value = getattr(opcode, "value", None)
-    if isinstance(value, int):
-        return value
-    if isinstance(opcode, str) and opcode.isdigit():
-        return int(opcode)
-    return None
-
-
 def looks_like_incoming_call(opcode: Any, payload: dict[str, Any]) -> bool:
-    value = opcode_value(opcode)
-    name = opcode_name(opcode)
-    if value == INCOMING_CALL_OPCODE:
+    value = opcode if isinstance(opcode, int) else getattr(opcode, "value", None)
+    name = str(getattr(opcode, "name", opcode) or "").upper()
+    if value == INCOMING_CALL_OPCODE or value == Opcode.NOTIF_CALL_START:
         return True
-    if "INCOMING_CALL" in name or "CALL_START" in name or name in {"NOTIF_INCOMING_CALL", "NOTIF_CALL_START"}:
+    if "INCOMING_CALL" in name or name in {"NOTIF_CALL_START", "NOTIF_INCOMING_CALL"}:
         return True
     if not payload:
         return False
     keys = {str(k).lower() for k in payload}
-    if "incomingcall" in keys or "isvideo" in keys and ("callerid" in keys or "initiatorid" in keys):
+    if "incomingcall" in keys or (
+        "isvideo" in keys and ("callerid" in keys or "initiatorid" in keys)
+    ):
         return True
     nested = payload.get("call") or payload.get("incomingCall") or payload.get("incoming_call")
     return isinstance(nested, dict)
 
 
-def parse_call_info(payload: dict[str, Any]) -> dict[str, Any]:
-    data = payload.get("call") or payload.get("incomingCall") or payload.get("incoming_call")
-    if not isinstance(data, dict):
-        data = payload
+def parse_call_info(payload: dict[str, Any] | CallAttachment | None) -> dict[str, Any]:
+    if isinstance(payload, CallAttachment):
+        caller = payload.contact_ids[0] if payload.contact_ids else None
+        video = payload.call_type == CallType.VIDEO
+        return {
+            "caller_id": int_or_none(caller),
+            "chat_id": None,
+            "video": bool(video),
+            "name": None,
+            "hangup": payload.hangup_type.value if payload.hangup_type else None,
+        }
+    data: dict[str, Any] = payload or {}
+    nested = data.get("call") or data.get("incomingCall") or data.get("incoming_call")
+    if isinstance(nested, dict):
+        data = nested
     caller = (
         data.get("callerId")
         or data.get("caller_id")
@@ -228,8 +237,11 @@ def parse_call_info(payload: dict[str, Any]) -> dict[str, Any]:
         or data.get("contactId")
         or data.get("contact_id")
     )
-    chat_id = data.get("chatId") or data.get("chat_id") or data.get("conversationId") or data.get(
-        "conversation_id"
+    chat_id = (
+        data.get("chatId")
+        or data.get("chat_id")
+        or data.get("conversationId")
+        or data.get("conversation_id")
     )
     video = data.get("isVideo")
     if video is None:
@@ -237,9 +249,50 @@ def parse_call_info(payload: dict[str, Any]) -> dict[str, Any]:
     if video is None:
         kind = str(data.get("type") or data.get("callType") or "").upper()
         video = "VIDEO" in kind
+    hangup = data.get("hangupType") or data.get("hangup_type")
     return {
         "caller_id": int_or_none(caller),
         "chat_id": int_or_none(chat_id),
         "video": bool(video),
         "name": data.get("name") or data.get("callerName") or data.get("title"),
+        "hangup": str(hangup) if hangup else None,
     }
+
+
+def attachment_type_name(attach: Any) -> str:
+    t = getattr(attach, "type", None)
+    if t is not None:
+        name = getattr(t, "name", None) or getattr(t, "value", None) or str(t)
+        return str(name).upper()
+    return type(attach).__name__.upper()
+
+
+def is_call_attachment(attach: Any) -> bool:
+    if isinstance(attach, CallAttachment):
+        return True
+    t = getattr(attach, "type", None)
+    if t == AttachmentType.CALL or t == AttachmentType.CALL.value:
+        return True
+    return "CALL" in attachment_type_name(attach)
+
+
+def is_text_attachment_only(message: Message) -> bool:
+    attaches = list(message.attaches or [])
+    if not attaches:
+        return True
+    return all(attachment_type_name(a) in {"", "CONTROL", "NONE"} for a in attaches)
+
+
+def message_timestamp(message: Message):
+    """Return a timezone-aware datetime, or None if MAX sent nothing useful."""
+    from datetime import UTC, datetime
+
+    raw = message.time
+    if not raw:
+        return None
+    # MAX sometimes sends milliseconds.
+    seconds = raw / 1000 if raw > 10_000_000_000 else raw
+    try:
+        return datetime.fromtimestamp(seconds, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None

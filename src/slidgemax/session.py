@@ -12,297 +12,471 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Per-user MAX session: PyMax client lifecycle and event mapping."""
+
 from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from slidge import BaseSession
-from slidge.core import config as slidge_config
+from pymax import Client, ExtraConfig
+from pymax.api.session.enums import DeviceType
+from pymax.protocol.models import InboundFrame
+from pymax.types.domain.attachments.call import CallAttachment
+from pymax.types.domain.chat import Chat
+from pymax.types.domain.message import Message
+from pymax.types.domain.user import User
+from slidge import BaseSession, global_config
+from slidge.command import FormField, SearchResult
+from slidge.group import LegacyBookmarks
+from slixmpp.exceptions import XMPPError
+
+from . import config
+from .auth import QueuePasswordProvider, QueueSmsProvider
+from .contact import Roster
+from .util import (
+    dialog_chat_id,
+    dialog_peer_from_chat,
+    dialog_peer_id,
+    display_name,
+    is_call_attachment,
+    is_group_chat,
+    is_group_message,
+    is_text_attachment_only,
+    looks_like_incoming_call,
+    message_timestamp,
+    normalize_phone,
+    parse_call_info,
+    payload_as_dict,
+    safe_filename,
+    sender_id,
+    user_id,
+)
 
 if TYPE_CHECKING:
     from .gateway import Gateway
 
-
-# Dummy MUC/bookmark types since GROUPS=False on the gateway.
-# We still need concrete classes for the BaseSession generic derivation.
-class _DummyMUC:
-    pass
+log = logging.getLogger(__name__)
 
 
-from slidge.group.bookmarks import LegacyBookmarks as _BaseBookmarks  # noqa: E402
-
-class _DummyBookmarks(_BaseBookmarks[_DummyMUC]):  # type: ignore[type-arg]
-    pass
-
-from .contact import Roster
-from .util import (
-    dialog_chat_id,
-    int_or_none,
-    session_dirname,
-    is_call_attachment,
-    is_text_attachment_only,
-    looks_like_incoming_call,
-    parse_call_info,
-    payload_as_dict,
-    sender_id,
-)
-
-log = logging.getLogger("slidgemax.session")
+def session_dir(jid: str) -> Path:
+    return Path(global_config.HOME_DIR) / "max_sessions" / safe_filename(jid)
 
 
-def _extra_config() -> Any:
-    from pymax import ExtraConfig
+def max_extra_config() -> ExtraConfig:
+    try:
+        device_type = DeviceType[config.DEVICE_TYPE.upper()]
+    except KeyError as exc:
+        raise ValueError(
+            f"Invalid DEVICE_TYPE {config.DEVICE_TYPE!r}; use DESKTOP, ANDROID or IOS"
+        ) from exc
+    return ExtraConfig(
+        reconnect=config.RECONNECT,
+        reconnect_delay=config.RECONNECT_DELAY,
+        device_type=device_type,
+        host=config.MAX_HOST,
+        port=int(config.MAX_PORT),
+        use_ssl=config.MAX_USE_SSL,
+        log_level="INFO",
+        persist_session=True,
+        relogin=True,
+        telemetry=False,
+    )
 
-    # Slidge sessions are long-lived; let PyMax reconnect.
-    return ExtraConfig(reconnect=True, reconnect_delay=30.0)
+
+def make_client(
+    phone: str,
+    work_dir: Path,
+    *,
+    sms_provider: QueueSmsProvider | None = None,
+    password_provider: QueuePasswordProvider | None = None,
+) -> Client:
+    work_dir.mkdir(parents=True, exist_ok=True)
+    kwargs: dict[str, Any] = {
+        "phone": phone,
+        "work_dir": str(work_dir),
+        "session_name": "session.db",
+        "extra_config": max_extra_config(),
+    }
+    if sms_provider is not None:
+        kwargs["sms_code_provider"] = sms_provider
+    if password_provider is not None:
+        kwargs["password_provider"] = password_provider
+    return Client(**kwargs)
 
 
-class Session(BaseSession[Roster, _DummyBookmarks]):  # type: ignore[type-arg]
-    """
-    One PyMax Client per registered XMPP user.
-    """
+class Session(BaseSession[Roster, LegacyBookmarks]):
+    """One PyMax client bound to one registered XMPP user."""
 
-    xmpp: "Gateway"  # type: ignore[name-defined]
+    xmpp: Gateway
 
-    def __init__(self, user: Any) -> None:
+    def __init__(self, user) -> None:  # noqa: ANN001
         super().__init__(user)
-        self.client: Any = None
-        self._task: asyncio.Task[None] | None = None
-        self._ready = asyncio.Event()
+        self.client: Client | None = None
         self._me_id: int | None = None
-        self._pushed: set[int] = set()
+        self._bound = False
 
-        # Where PyMax stores its session sqlite
-        safe = session_dirname(str(user.jid.bare))
-        self.work_dir: Path = Path(slidge_config.HOME_DIR) / "max_sessions" / safe
-        self.work_dir.mkdir(parents=True, exist_ok=True)
+    @property
+    def phone(self) -> str:
+        return str(self.user.get("phone") or "")
 
     @property
     def me_id(self) -> int | None:
         if self._me_id is not None:
             return self._me_id
         if self.client is not None:
-            self._me_id = int_or_none(self.client.me)
-        return self._me_id
+            ident = user_id(self.client.me)
+            if ident is not None:
+                self._me_id = ident
+                return ident
+        stored = self.user.get("max_user_id")
+        if stored not in (None, ""):
+            try:
+                self._me_id = int(stored)  # type: ignore[arg-type]
+                return self._me_id
+            except (TypeError, ValueError):
+                return None
+        return None
 
-    async def login(self) -> str | None:
-        """
-        Restore / create PyMax Client from stored legacy_module_data (phone) and session files.
-        """
-        phone = None
-        data = self.user.legacy_module_data or {}
-        if isinstance(data, dict):
-            phone = data.get("phone")
-        if not phone:
-            # legacy fallback
-            phone = data.get("username") if isinstance(data, dict) else None
-        if not phone:
-            raise RuntimeError("No phone in user data; re-register")
+    def work_dir(self) -> Path:
+        return session_dir(self.user.jid.bare)
 
-        # If we have a previous max_user_id, keep it
-        if isinstance(data, dict) and data.get("max_user_id"):
-            self._me_id = int_or_none(data.get("max_user_id"))
+    async def login(self) -> str:
+        pending = self.xmpp.pending.pop(self.user.jid.bare, None)
+        if pending is not None and pending.client is not None:
+            if pending.failed.is_set() and not pending.ready.is_set():
+                raise RuntimeError(pending.error or "MAX login failed")
+            if not pending.ready.is_set():
+                state = await pending.wait(config.REGISTRATION_TIMEOUT)
+                if state != "ready":
+                    raise RuntimeError(
+                        pending.error or f"MAX login did not finish (state={state})"
+                    )
+            self.client = pending.client
+            self._me_id = pending.me_id or user_id(self.client.me)
+            self._bind_client(self.client)
+        else:
+            phone = self.phone
+            if not phone:
+                raise RuntimeError("No MAX phone number stored for this account")
+            work_dir = self.work_dir()
+            self.client = make_client(phone, work_dir)
+            self._bind_client(self.client)
+            self.create_task(self._run_client(), name=f"pymax:{self.user.jid.bare}")
+            # _bind_client wires on_start to set logged-in state via an Event we wait on.
+            await self._wait_client_ready()
 
-        log.info(
-            "login jid=%s phone=%s work_dir=%s session_db_exists=%s",
-            self.user.jid.bare,
-            phone,
-            self.work_dir,
-            (self.work_dir / "session.db").is_file(),
+        ident = self.me_id
+        if ident is not None:
+            self.contacts.user_legacy_id = str(ident)
+            self.legacy_module_data_update(
+                {
+                    "max_user_id": ident,
+                    "max_name": display_name(self.client.me if self.client else None),
+                }
+            )
+        name = str(self.user.get("max_name") or display_name(self.client.me if self.client else None))
+        return f"Connected as {name} (MAX {ident or '?'})"
+
+    async def _wait_client_ready(self) -> None:
+        ready = getattr(self, "_client_ready")
+        failed = getattr(self, "_client_failed")
+        waiters = [
+            asyncio.create_task(ready.wait()),
+            asyncio.create_task(failed.wait()),
+        ]
+        done, pending = await asyncio.wait(
+            waiters, timeout=config.REGISTRATION_TIMEOUT, return_when=asyncio.FIRST_COMPLETED
         )
-        self.client = self._make_client(phone)
-        self._attach_handlers(self.client)
-        self._task = asyncio.create_task(self._run_client(), name=f"slidgemax-{self.user.jid.bare}")
+        for task in pending:
+            task.cancel()
+        if failed.is_set() and not ready.is_set():
+            raise RuntimeError(getattr(self, "_client_error", None) or "MAX login failed")
+        if not ready.is_set():
+            raise TimeoutError("MAX login timed out")
 
-        # Wait until connected or failed (but return promptly; listeners run in bg)
-        # Slidge recommends returning once "logged in" or starting the listener task.
-        # We wait a short time so that initial roster fill etc can happen.
-        try:
-            await asyncio.wait_for(self._ready.wait(), timeout=30)
-        except asyncio.TimeoutError:
-            pass
+    def _bind_client(self, client: Client) -> None:
+        if self._bound:
+            return
+        self._bound = True
+        self._client_ready = asyncio.Event()
+        self._client_failed = asyncio.Event()
+        self._client_error: str | None = None
 
-        me = self.me_id or "?"
-        return f"Connected as MAX {me}"
-
-    def _make_client(self, phone: str) -> Any:
-        from pymax import Client
-
-        kwargs: dict[str, Any] = {
-            "phone": phone,
-            "work_dir": str(self.work_dir),
-            "session_name": "session.db",
-            "extra_config": _extra_config(),
-        }
-        # No providers here: this is a restored session login. If token missing, PyMax will re-SMS but we have no provider -> will fail.
-        # For re-auth, user should unregister+register.
-        return Client(**kwargs)
-
-    def _attach_handlers(self, client: Any) -> None:
         @client.on_start()
-        async def _on_start(c: Any) -> None:
-            self._me_id = int_or_none(c.me)
-            self._ready.set()
-            log.info("MAX connected for %s (id=%s)", self.user.jid.bare, self._me_id)
+        async def on_start(c: Client) -> None:
+            self._me_id = user_id(c.me)
+            self._client_ready.set()
+            self.log.info("MAX session ready (id=%s)", self._me_id)
 
         @client.on_message()
-        async def _on_msg(message: Any, c: Any) -> None:
-            await self._handle_incoming(message)
+        async def on_message(message: Message, _c: Client) -> None:
+            try:
+                await self._on_max_message(message)
+            except Exception:
+                self.log.exception("Error handling incoming MAX message")
 
         @client.on_message_edit()
-        async def _on_edit(message: Any, c: Any) -> None:
-            await self._handle_incoming_edit(message)
+        async def on_edit(message: Message, _c: Client) -> None:
+            try:
+                await self._on_max_edit(message)
+            except Exception:
+                self.log.exception("Error handling MAX message edit")
 
         @client.on_raw()
-        async def _on_raw(frame: Any, c: Any) -> None:
-            if not self.xmpp.call_notifications:
-                return
-            op = frame.opcode
-            pl = payload_as_dict(frame.payload)
-            if looks_like_incoming_call(op, pl):
-                info = parse_call_info(pl)
-                await self._notify_call(info, None)
+        async def on_raw(frame: InboundFrame, _c: Client) -> None:
+            try:
+                await self._on_max_raw(frame)
+            except Exception:
+                self.log.exception("Error handling MAX raw frame")
+
+        @client.on_error()
+        async def on_error(*args: Any) -> None:
+            exc = next((a for a in args if isinstance(a, BaseException)), None)
+            self._client_error = str(exc) if exc else "MAX client error"
+            self.log.warning("MAX client error: %s", self._client_error)
+            if not self._client_ready.is_set():
+                self._client_failed.set()
 
     async def _run_client(self) -> None:
         assert self.client is not None
         try:
             await self.client.start()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            log.exception("MAX client error for %s: %s", self.user.jid.bare, exc)
+        except Exception as exc:
+            self._client_error = str(exc) or type(exc).__name__
+            self.log.exception("MAX client crashed: %s", exc)
+            self._client_failed.set()
 
-    async def _handle_incoming(self, message: Any) -> None:
+    async def logout(self) -> None:
+        client = self.client
+        self.client = None
+        if client is not None:
+            try:
+                await client.stop()
+            except Exception:
+                self.log.debug("client.stop() failed", exc_info=True)
+
+    async def on_unregister(self) -> None:
+        await self.logout()
+        shutil.rmtree(self.work_dir(), ignore_errors=True)
+
+    def max_contacts(self) -> list[User]:
+        if self.client is None:
+            return []
+        return [c for c in (self.client.contacts or []) if c is not None]
+
+    def max_chats(self) -> list[Chat]:
+        if self.client is None:
+            return []
+        return list(self.client.chats or [])
+
+    def _find_chat(self, chat_id: int) -> Chat | None:
+        for chat in self.max_chats():
+            if chat.id == chat_id:
+                return chat
+        return None
+
+    def peer_from_chat(self, chat: Chat) -> int | None:
+        if config.IGNORE_GROUPS and is_group_chat(chat):
+            return None
+        return dialog_peer_from_chat(chat, self.me_id)
+
+    def dialog_chat_id(self, peer_id: int) -> int:
         me = self.me_id
-        sid = sender_id(message)
-        if me is not None and sid == me:
-            return  # echo of own message
+        if me is None:
+            raise RuntimeError("MAX account id is unknown")
+        if self.client is not None:
+            return self.client.get_chat_id(me, peer_id)
+        return dialog_chat_id(me, peer_id)
 
-        peer = self._resolve_peer(message)
-        if peer is None:
-            return
-
-        # ensure contact is known
-        contact = await self.contacts.by_legacy_id(str(peer))
-        if peer not in self._pushed:
-            await contact.update_info()
-            self._pushed.add(peer)
-
-        body = message.text
-        if not body:
-            if self.xmpp.placeholder_unsupported and not is_text_attachment_only(message):
-                body = self.xmpp.unsupported_text
-            else:
-                return
-
-        # call detection via attachment
-        for att in message.attaches:
-            if is_call_attachment(att):
-                await self._notify_call({}, message)
-                return
-
-        contact.send_text(str(body), legacy_msg_id=str(message.id))
-
-    async def _handle_incoming_edit(self, message: Any) -> None:
+    def resolve_dialog_peer(self, message: Message) -> int | None:
         me = self.me_id
-        sid = sender_id(message)
-        if me is not None and sid == me:
-            return
-        peer = self._resolve_peer(message)
-        if peer is None:
-            return
-        contact = await self.contacts.by_legacy_id(str(peer))
-        contact.correct(str(message.id), message.text or "")
-
-    def _resolve_peer(self, message: Any) -> int | None:
-        me = self.me_id
+        if config.IGNORE_GROUPS and is_group_message(message):
+            return None
         chat_id = message.chat_id
         sid = sender_id(message)
-        if chat_id is not None and me is not None:
-            # 1:1 chat id is me ^ peer
-            peer = chat_id ^ me
-            # verify
-            if sid in (me, peer, None):
-                return peer
-            # group? ignore for now (GROUPS=False)
-            return None
+        if chat_id is not None:
+            chat = self._find_chat(chat_id)
+            if chat is not None:
+                if config.IGNORE_GROUPS and is_group_chat(chat):
+                    return None
+                peer = dialog_peer_from_chat(chat, me)
+                if peer is not None:
+                    return peer
+            if me is not None:
+                peer = dialog_peer_id(chat_id, me)
+                if sid is None:
+                    return None if config.IGNORE_GROUPS else peer
+                if sid in {me, peer}:
+                    return peer
+                if config.IGNORE_GROUPS:
+                    return None
         if sid is not None and sid != me:
             return sid
         return None
 
-    async def _notify_call(self, info: dict[str, Any], message: Any | None) -> None:
-        if not self.xmpp.call_notifications:
+    async def send_text(self, peer_id: int, text: str) -> Message:
+        if self.client is None:
+            raise XMPPError("recipient-unavailable", "MAX session is not connected")
+        chat_id = self.dialog_chat_id(peer_id)
+        return await self.client.send_message(chat_id=chat_id, text=text)
+
+    async def edit_text(self, peer_id: int, message_id: int, text: str) -> Message:
+        if self.client is None:
+            raise XMPPError("recipient-unavailable", "MAX session is not connected")
+        chat_id = self.dialog_chat_id(peer_id)
+        return await self.client.edit_message(
+            chat_id=chat_id, message_id=message_id, text=text
+        )
+
+    async def delete_text(self, peer_id: int, message_id: int) -> None:
+        if self.client is None:
+            raise XMPPError("recipient-unavailable", "MAX session is not connected")
+        chat_id = self.dialog_chat_id(peer_id)
+        await self.client.delete_message(
+            chat_id=chat_id, message_ids=[message_id], for_me=False
+        )
+
+    async def add_max_contact(self, user_id_: int) -> None:
+        if self.client is None:
             return
-        caller = int_or_none(info.get("caller_id"))
-        if caller is None and message is not None:
-            caller = self._resolve_peer(message) or sender_id(message)
+        try:
+            await self.client.add_contact(user_id_)
+        except Exception:
+            self.log.debug("add_contact(%s) failed", user_id_, exc_info=True)
+
+    async def remove_max_contact(self, user_id_: int) -> None:
+        if self.client is None:
+            return
+        try:
+            await self.client.remove_contact(user_id_)
+        except Exception:
+            self.log.debug("remove_contact(%s) failed", user_id_, exc_info=True)
+
+    async def on_search(self, form_values: dict[str, str]) -> SearchResult | None:
+        query = (form_values.get("query") or form_values.get("phone") or "").strip()
+        if not query:
+            return None
+        if self.client is None:
+            raise XMPPError("recipient-unavailable", "MAX session is not connected")
+
+        user: User | None = None
+        if query.isdigit():
+            user = await self.client.get_user(int(query))
+        else:
+            try:
+                phone = normalize_phone(query)
+            except ValueError as exc:
+                raise XMPPError("bad-request", str(exc)) from exc
+            try:
+                user = await self.client.search_by_phone(phone)
+            except Exception as exc:
+                self.log.debug("search_by_phone failed", exc_info=True)
+                raise XMPPError("item-not-found", f"No MAX user for {phone}") from exc
+
+        if user is None:
+            return None
+        ident = user_id(user)
+        if ident is None:
+            return None
+        jid = f"{ident}@{self.xmpp.boundjid.bare}"
+        return SearchResult(
+            fields=[
+                FormField(var="jid", label="JID"),
+                FormField(var="name", label="Name"),
+                FormField(var="id", label="MAX id"),
+            ],
+            items=[
+                {
+                    "jid": jid,
+                    "name": display_name(user, fallback=f"MAX {ident}"),
+                    "id": str(ident),
+                }
+            ],
+        )
+
+    async def _contact(self, peer_id: int):
+        return await self.contacts.by_legacy_id(str(peer_id))
+
+    async def _on_max_message(self, message: Message) -> None:
+        peer = self.resolve_dialog_peer(message)
+        if peer is None:
+            return
+        contact = await self._contact(peer)
+        contact.is_friend = True
+
+        carbon = self.me_id is not None and sender_id(message) == self.me_id
+        when = message_timestamp(message)
+        legacy_id = str(message.id)
+
+        for attach in message.attaches or []:
+            if is_call_attachment(attach):
+                await self._notify_call(contact, attach, when=when, carbon=carbon)
+                return
+
+        body = (message.text or "").strip()
+        if not body:
+            if config.PLACEHOLDER_UNSUPPORTED and not is_text_attachment_only(message):
+                body = config.UNSUPPORTED_TEXT
+            else:
+                return
+
+        contact.send_text(
+            body,
+            legacy_msg_id=legacy_id,
+            when=when,
+            carbon=carbon,
+        )
+
+    async def _on_max_edit(self, message: Message) -> None:
+        peer = self.resolve_dialog_peer(message)
+        if peer is None:
+            return
+        contact = await self._contact(peer)
+        carbon = self.me_id is not None and sender_id(message) == self.me_id
+        contact.correct(
+            str(message.id),
+            message.text or "",
+            when=message_timestamp(message),
+            carbon=carbon,
+        )
+
+    async def _on_max_raw(self, frame: InboundFrame) -> None:
+        if not config.CALL_NOTIFICATIONS:
+            return
+        payload = payload_as_dict(frame.payload)
+        if not looks_like_incoming_call(frame.opcode, payload):
+            return
+        info = parse_call_info(payload)
+        caller = info.get("caller_id")
+        if caller is None and info.get("chat_id") is not None and self.me_id is not None:
+            caller = dialog_peer_id(int(info["chat_id"]), self.me_id)
         if caller is None:
             return
-        text = "Incoming video call" if info.get("video") else "Incoming voice call"
+        contact = await self._contact(int(caller))
+        contact.is_friend = True
+        await self._notify_call(contact, info)
+
+    async def _notify_call(
+        self,
+        contact,
+        extra: CallAttachment | dict[str, Any],
+        *,
+        when: datetime | None = None,
+        carbon: bool = False,
+    ) -> None:
+        if not config.CALL_NOTIFICATIONS:
+            return
+        info = parse_call_info(extra if isinstance(extra, dict) else extra)
+        text = config.CALL_VIDEO_TEXT if info.get("video") else config.CALL_VOICE_TEXT
+        hangup = (info.get("hangup") or "").upper()
+        if hangup == "MISSED":
+            text = f"Missed call — {text}"
         name = info.get("name")
         if name:
             text = f"{text} ({name})"
-        contact = await self.contacts.by_legacy_id(str(caller))
-        contact.send_text(text)
-
-    async def send_text(self, peer_id: int, text: str) -> Any:
-        client = self.client
-        if client is None:
-            raise RuntimeError("Not connected to MAX")
-        me = self.me_id
-        if me is None:
-            raise RuntimeError("MAX id unknown")
-        chat_id = dialog_chat_id(me, peer_id)
-        sent = await client.send_message(chat_id=chat_id, text=text)
-        return sent
-
-    async def edit_text(self, chat_id: int, message_id: int, text: str) -> Any:
-        client = self.client
-        if client is None:
-            raise RuntimeError("Not connected to MAX")
-        return await client.edit_message(chat_id=chat_id, message_id=message_id, text=text)
-
-    # --- roster / contacts helpers used by Roster ---
-
-    def contacts_list(self) -> list[Any]:
-        c = self.client
-        if c is None:
-            return []
-        return [x for x in c.contacts if x]
-
-    def chats_list(self) -> list[Any]:
-        c = self.client
-        if c is None:
-            return []
-        return list(c.chats or [])
-
-    async def lookup_user(self, user_id: int) -> Any | None:
-        c = self.client
-        if c is None:
-            return None
-        try:
-            return await c.get_user(user_id)
-        except Exception:
-            return None
-
-    # shutdown
-    async def logout(self) -> None:
-        task = self._task
-        client = self.client
-        self._task = None
-        self.client = None
-        if task:
-            task.cancel()
-        if client:
-            try:
-                await client.stop()
-            except Exception:
-                log.debug("failed to stop MAX client", exc_info=True)
-        if task:
-            try:
-                await task
-            except Exception:
-                pass
+        contact.send_text(text, when=when, carbon=carbon)
