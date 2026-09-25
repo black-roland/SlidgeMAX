@@ -63,7 +63,7 @@ uv run slidge \
 3. Provide phone number, then the SMS code in the next form.
 4. If MAX has account 2FA, a third form asks for that password. Do not send it as a chat message.
 
-Contacts appear as `123456@max.example.org`.
+Contacts appear as `123456@max.example.org`. The contact vCard note is the MAX profile description when that contact object includes one, and is omitted otherwise. Profile links and MAX ids are not put in the note.
 
 ## Presence
 

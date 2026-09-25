@@ -28,6 +28,7 @@ from slidgemax.util import (
     parse_call_info,
     safe_filename,
     user_id,
+    vcard_note,
 )
 
 
@@ -74,6 +75,22 @@ def test_display_name() -> None:
     assert display_name(User(id=7, names=[Name(name="Ada")])) == "Ada"
     assert display_name(None, fallback="x") == "x"
     assert display_name(User(id=9, names=[])) == "MAX 9"
+
+
+def test_vcard_note() -> None:
+    cases = (
+        None,
+        12,
+        "",
+        "   ",
+        "  bio  ",
+        "line\n  two",
+        "hel\x00lo",
+        " \x00 ",
+    )
+    notes = [vcard_note(value) for value in cases]
+    assert notes == [None, None, None, None, "bio", "line\n  two", "hello", None]
+    assert all(note is None or "MAX id" not in note for note in notes)
 
 
 def _chat(**kwargs: object) -> Chat:

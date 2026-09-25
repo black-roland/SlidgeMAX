@@ -26,7 +26,7 @@ from slixmpp import JID
 from slixmpp.exceptions import XMPPError
 
 from . import config
-from .util import display_name, map_presence, user_id
+from .util import display_name, map_presence, user_id, vcard_note
 
 if TYPE_CHECKING:
     from pymax.types.domain.presence import Presence
@@ -67,7 +67,7 @@ class Contact(LegacyContact):
             self.set_vcard(
                 full_name=self.name,
                 phone=str(phone) if phone else None,
-                note=f"MAX id {ident}",
+                note=vcard_note(user.description),
             )
         elif not self.name:
             self.name = f"MAX {ident}"

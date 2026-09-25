@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared helpers: phones, names, MAX ids, call/group detection, presence."""
+"""Shared helpers: phones, names, MAX ids, vCard notes, call/group detection, presence."""
 
 from __future__ import annotations
 
@@ -174,6 +174,18 @@ def display_name(user: Any, fallback: str | None = None) -> str:
     if ident is not None:
         return fallback or f"MAX {ident}"
     return fallback or "MAX user"
+
+
+def vcard_note(description: Any) -> str | None:
+    """Return a contact vCard note from a MAX profile description.
+
+    Non-strings, including None, are omitted. Ends are stripped and NUL bytes
+    removed. An empty result is omitted. The note is never prefixed with a MAX id.
+    """
+    if not isinstance(description, str):
+        return None
+    text = description.strip().replace("\x00", "")
+    return text or None
 
 
 def payload_as_dict(payload: Any) -> dict[str, Any]:
