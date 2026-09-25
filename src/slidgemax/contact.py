@@ -52,10 +52,10 @@ class Contact(LegacyContact):
     RETRACTION = True
     REPLIES = False
 
-    async def update_info(self, user: User | None = None) -> None:
+    async def update_info(self, user: User | None = None, resolved: bool = False) -> None:
         session = self.session
         ident = int(self.legacy_id)
-        if user is None and session.client is not None:
+        if user is None and not resolved and session.client is not None:
             try:
                 user = await session.client.get_user(ident)
             except Exception:
@@ -163,6 +163,7 @@ class Roster(LegacyRoster[Contact]):
             contact.is_friend = True
             yield contact
 
+        dialog_peers: list[int] = []
         for chat in session.max_chats():
             peer = session.peer_from_chat(chat)
             if peer is None or peer == me:
@@ -171,5 +172,35 @@ class Roster(LegacyRoster[Contact]):
             if key in seen:
                 continue
             seen.add(key)
-            contact = await self.by_legacy_id(key)
+            dialog_peers.append(peer)
+
+        pending = [
+            peer
+            for peer in dialog_peers
+            if self.by_legacy_id_if_exists(str(peer)) is None
+        ]
+        fetched = await self._fetch_users(pending)
+        attempted = set(pending)
+        for peer in dialog_peers:
+            key = str(peer)
+            if peer in attempted:
+                contact = await self.by_legacy_id(key, fetched.get(peer), True)
+            else:
+                contact = await self.by_legacy_id(key)
             yield contact
+
+    async def _fetch_users(self, peer_ids: list[int]) -> dict[int, User]:
+        client = self.session.client
+        if client is None or not peer_ids:
+            return {}
+        try:
+            found = await client.get_users(peer_ids)
+        except Exception:
+            log.debug("get_users(%s) failed", peer_ids, exc_info=True)
+            return {}
+        indexed: dict[int, User] = {}
+        for user in found:
+            ident = user_id(user)
+            if ident is not None:
+                indexed[ident] = user
+        return indexed
