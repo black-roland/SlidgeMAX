@@ -1,39 +1,54 @@
 # SlidgeMAX
 
-XMPP gateway (legacy module) for the [MAX](https://max.ru) messenger, built on [Slidge](https://slidge.im/).
+XMPP-шлюз (legacy-модуль) для мессенджера MAX, построенный на [Slidge](https://slidge.im/).
 
-Bridges 1:1 chats, message editing, and text notifications for calls. No groups.
+Поддерживает личные чаты 1:1, редактирование сообщений и текстовые уведомления о звонках.
 
-## Requirements
+> [!WARNING]
+> Это **неофициальный** и **экспериментальный** шлюз. SlidgeMAX использует клиент [PyMax](https://github.com/MaxApiTeam/PyMax), который работает через неофициальный внутренний API. Этот API может измениться без предупреждения, а использование может нарушать условия сервиса.
+> Вы используете SlidgeMAX на свой риск. Авторы и контрибьюторы не несут ответственности за блокировки аккаунтов, потерю данных или другие последствия.
 
-- Python >= 3.13
-- An XMPP server with external component support (Prosody recommended)
-- `uv` or pip
+## Что поддерживается
 
-## Install for systemd (`/opt/slidgemax`)
+- Контакты и никнеймы.
+- Личные сообщения.
+- Редактирование сообщений (XEP-0308).
+- Текстовые уведомления о входящих звонках.
+- Регистрация по SMS и опциональному 2FA-паролю.
+- Текст-заглушка, когда MAX присылает неподдерживаемые медиа.
 
-Slidge is not a separate daemon. It is a Python library pulled in when this package is installed. The systemd unit runs `/opt/slidgemax/bin/slidgemax`, which calls Slidge with `--legacy-module slidgemax`.
+## Что не поддерживается
 
-Requires Python 3.13+. On RHEL, AlmaLinux, or Rocky Linux, install `uv` from EPEL and let it use a matching interpreter.
+Группы, каналы, `WebClient` / QR-вход, реакции, стикеры, опросы, файлы, голосовые сообщения, полноценные звонки, форматирование, аватары.
+
+## Требования
+
+- Python ≥3.13 (рекомендуется 3.14).
+- XMPP-сервер с поддержкой внешних компонентов (рекомендуется Prosody).
+- uv или pip.
+
+## Установка на RHEL/Fedora
+
+Slidge не является отдельным демоном. Это Python-библиотека, которая подтягивается при установке этого пакета. Systemd-юнит запускает `/opt/slidgemax/bin/slidgemax`, который вызывает Slidge с `--legacy-module slidgemax`.
 
 ```bash
-# as root
+# от root
 dnf install epel-release
 dnf install uv python3.14
 
-git clone <repo> /opt/slidgemax-src
+git clone https://github.com/black-roland/slidgemax /opt/slidgemax-src
 cd /opt/slidgemax-src
 uv venv /opt/slidgemax --python 3.14
 uv pip install --python /opt/slidgemax/bin/python .
 
-# Slidge lands in the same venv:
+# Slidge оказывается в том же venv:
 /opt/slidgemax/bin/python -c 'import slidge, slidgemax; print(slidge.__version__, slidgemax.__version__)'
 /opt/slidgemax/bin/slidgemax --help
 ```
 
-Leave `/opt/slidgemax` owned by root and world-executable. The service user only needs to run that interpreter; it must not write there. State (Slidge database, PyMax session files) goes under `/var/lib/slidgemax/<jid>/`.
+Каталог `/opt/slidgemax` должен принадлежать root и быть доступным для выполнения всем. Пользователю сервиса нужно только запускать этот интерпретатор; писать туда он не должен. Состояние (база Slidge, файлы сессий PyMax) хранится в `/var/lib/slidgemax/<jid>/`.
 
-To upgrade, pull the source and reinstall into the same venv:
+Для обновления сделайте pull и переустановите в тот же venv:
 
 ```bash
 cd /opt/slidgemax-src
@@ -42,52 +57,16 @@ uv pip install --python /opt/slidgemax/bin/python .
 systemctl restart slidgemax@max.example.org.service
 ```
 
-## Run (development)
-
-From a checkout, without the `/opt` install:
+### Systemd-сервис
 
 ```bash
-uv sync
-uv run slidge \
-  --legacy-module slidgemax \
-  --jid max.example.org \
-  --secret "shared-secret" \
-  --home-dir ./data \
-  --server 127.0.0.1 --port 5347
-```
-
-## Registration
-
-1. In your XMPP client, discover the component.
-2. Run the **Register** ad-hoc command (or send "register").
-3. Provide phone number, then the SMS code in the next form.
-4. If MAX has account 2FA, a third form asks for that password. Do not send it as a chat message.
-
-Contacts appear as `123456@max.example.org`. The contact vCard note is the MAX profile description when that contact object includes one, and is omitted otherwise. Profile links and MAX ids are not put in the note.
-
-## Presence
-
-Presence and last seen are push-only. A contact stays unmarked until MAX sends a presence event; the gateway does not mark the roster available. Status `1` is online. A last-seen time without that status, and any unknown status code that includes a timestamp, is shown as away, not online. There is no presence snapshot at login. Disable with `--presence`.
-
-## Prosody example
-
-```
-Component "max.example.org"
-    component_secret = "shared-secret"
-```
-
-## Running as a systemd service
-
-Install into `/opt/slidgemax` first (see above). The unit is `contrib/systemd/slidgemax@.service`. The instance name is the component JID. Settings use `/etc/sysconfig`: `KEY=value`, no `export`.
-
-```bash
-# as root, after /opt/slidgemax is installed
+# от root, после установки /opt/slidgemax
 useradd --system --home-dir /var/lib/slidgemax --shell /usr/sbin/nologin slidgemax
 install -d -o slidgemax -g slidgemax -m 0750 /var/lib/slidgemax
 
 cp contrib/systemd/slidgemax@.service /etc/systemd/system/
 
-# Required per-instance file. Optional shared defaults: /etc/sysconfig/slidgemax
+# Обязательный файл для экземпляра. Опциональные общие настройки: /etc/sysconfig/slidgemax
 cat > /etc/sysconfig/slidgemax-max.example.org <<EOF
 MAX_COMPONENT_SECRET=your-component-secret
 EOF
@@ -99,31 +78,55 @@ systemctl enable --now slidgemax@max.example.org.service
 journalctl -u slidgemax@max.example.org -f
 ```
 
-`ExecStart` is `/opt/slidgemax/bin/slidgemax`. That script starts Slidge; do not install Slidge on its own for this unit. Prosody must use the same JID and the same `MAX_COMPONENT_SECRET`.
+`ExecStart` — это `/opt/slidgemax/bin/slidgemax`. Этот скрипт запускает Slidge; не устанавливайте Slidge отдельно для этого юнита. Prosody должен использовать тот же JID и тот же `MAX_COMPONENT_SECRET`.
 
-## Configuration
+## Prosody
 
-Slidge options apply (`--home-dir`, logging, etc.).
-
-Additional runtime flags are not exposed yet; defaults are sensible (reconnect on, ignore groups, call notifications on, placeholder for unsupported media).
-
-PyMax sessions are stored under `$HOME_DIR/max_sessions/`.
-
-## Limitations (as designed)
-
-- 1:1 only (groups out of scope)
-- Text, edits, call notifications, and push-only presence / last seen
-- Unknown MAX presence codes are away when a last-seen time is present, never online
-- No files, voice, stickers, reactions, rich cards, avatars
-- PyMax is unofficial
-
-## Development
-
-```bash
-uv sync --dev
-uv run pytest
+```lua
+Component "max.example.org"
+    component_secret = "the-same-secret-as-the-ini"
 ```
 
-## License
+Привилегированная сущность (XEP-0356) рекомендуется, чтобы шлюз мог добавлять контакты MAX в ростер пользователя. См. [документацию Slidge по привилегиям](https://slidge.im/docs/matridge/main/admin/privileges.html).
+
+## Регистрация
+
+1. Найдите шлюз (`max.example.org`).
+2. Выполните ad-hoc команду **Register**.
+3. Укажите номер телефона, при необходимости 2FA-пароль, затем SMS-код.
+4. Контакты появятся в ростере как `id@max.example.org`.
+
+**Gajim:** Accounts → Discover services → шлюз → Execute command.
+
+## Ограничения
+
+- Только 1:1 (без групповых чатов и каналов)
+- Текст, редактирование, уведомления о звонках и присутствие/последнее посещение.
+- Нет поддержки файлов, голоса, стикеров, реакций, карточек, аватаров.
+
+## Вклад в проект
+
+[Как внести вклад](CONTRIBUTING.md).
+
+## Разработка
+
+```bash
+uv sync
+uv run slidge \
+  --legacy-module slidgemax \
+  --jid max.example.org \
+  --secret "shared-secret" \
+  --home-dir ./data \
+  --server 127.0.0.1 --port 5347
+```
+
+### Тесты
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
+
+## Лицензия
 
 Apache-2.0
