@@ -14,6 +14,8 @@ from pymax.types.domain.profile import Profile
 from pymax.types.domain.user import User
 
 from slidgemax.util import (
+    avatar_https_url,
+    avatar_legacy_id,
     dialog_chat_id,
     dialog_peer_from_chat,
     dialog_peer_id,
@@ -91,6 +93,22 @@ def test_vcard_note() -> None:
     notes = [vcard_note(value) for value in cases]
     assert notes == [None, None, None, None, "bio", "line\n  two", "hello", None]
     assert all(note is None or "MAX id" not in note for note in notes)
+
+
+def test_avatar_https_url() -> None:
+    assert avatar_https_url(None) is None
+    assert avatar_https_url(12) is None
+    assert avatar_https_url("   ") is None
+    assert avatar_https_url("http://i.oneme.ru/i?r=x") is None
+    assert avatar_https_url("  https://i.oneme.ru/i?r=x  ") == "https://i.oneme.ru/i?r=x"
+
+
+def test_avatar_legacy_id() -> None:
+    assert avatar_legacy_id(None) is None
+    assert avatar_legacy_id(True) is None
+    assert avatar_legacy_id(0) is None
+    assert avatar_legacy_id(-3) is None
+    assert avatar_legacy_id(42) == "42"
 
 
 def _chat(**kwargs: object) -> Chat:

@@ -3,10 +3,12 @@ from __future__ import annotations
 import inspect
 
 from slidge.command.register import RegistrationType
+from slidge.contact import LegacyContact
 from slidge.group import LegacyBookmarks
 
 from slidgemax import Gateway, Session, __version__
 from slidgemax import config
+from slidgemax.avatar import SetAvatarMixin
 from slidgemax.contact import Contact, Roster
 from slidgemax.session import max_extra_config
 from slidgemax.util import normalize_phone
@@ -32,6 +34,10 @@ def test_gateway_identity() -> None:
     assert [field.var for field in Gateway.SEARCH_FIELDS] == ["query"]
 
 
+async def test_backfill_does_not_raise() -> None:
+    await Contact.__new__(Contact).backfill(None)
+
+
 def test_contact_does_not_force_online() -> None:
     assert "self.online()" not in inspect.getsource(Contact.update_info)
     assert not getattr(Contact, "ONLINE", False)
@@ -42,7 +48,9 @@ def test_contact_disco_flags() -> None:
     assert Contact.CORRECTION is True
     assert Contact.REACTION is False
     assert Contact.UPLOAD is False
-    assert Contact.AVATAR is False
+    assert Contact.AVATAR is True
+    assert issubclass(Contact, SetAvatarMixin)
+    assert Contact.__mro__.index(SetAvatarMixin) < Contact.__mro__.index(LegacyContact)
 
 
 def test_phone_used_by_registration() -> None:

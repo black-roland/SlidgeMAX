@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared helpers: phones, names, MAX ids, vCard notes, call/group detection, presence."""
+"""Shared helpers: phones, names, MAX ids, vCard notes, avatars, call/group detection, presence."""
 
 from __future__ import annotations
 
@@ -186,6 +186,25 @@ def vcard_note(description: Any) -> str | None:
         return None
     text = description.strip().replace("\x00", "")
     return text or None
+
+
+def avatar_https_url(base_url: Any) -> str | None:
+    """Return a stripped https avatar URL, or None for anything else."""
+    if not isinstance(base_url, str):
+        return None
+    text = base_url.strip()
+    if not text.startswith("https://"):
+        return None
+    return text
+
+
+def avatar_legacy_id(photo_id: Any) -> str | None:
+    """Return a positive photo id as text. Booleans and other values are omitted."""
+    if isinstance(photo_id, bool) or not isinstance(photo_id, int):
+        return None
+    if photo_id <= 0:
+        return None
+    return str(photo_id)
 
 
 def payload_as_dict(payload: Any) -> dict[str, Any]:

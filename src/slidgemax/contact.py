@@ -21,11 +21,12 @@ from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING
 
 from slidge.contact import LegacyContact, LegacyRoster
-from slidge.util.types import ContactMessage
+from slidge.util.types import ContactMessage, HoleBound
 from slixmpp import JID
 from slixmpp.exceptions import XMPPError
 
 from . import config
+from .avatar import SetAvatarMixin
 from .util import display_name, map_presence, user_id, vcard_note
 
 if TYPE_CHECKING:
@@ -37,12 +38,12 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class Contact(LegacyContact):
+class Contact(SetAvatarMixin, LegacyContact):
     """A MAX user presented as an XMPP contact ``<id>@gateway``."""
 
     session: Session
 
-    AVATAR = False
+    AVATAR = True
     RECEIPTS = False
     MARKS = False
     CHAT_STATES = False
@@ -72,6 +73,11 @@ class Contact(LegacyContact):
         elif not self.name:
             self.name = f"MAX {ident}"
         self.apply_presence()
+        if user is not None:
+            await self.update_avatar(user.base_url, user.photo_id)
+
+    async def backfill(self, after: HoleBound | None) -> None:
+        return
 
     def apply_presence(self, presence: Presence | None = None) -> None:
         if not config.PRESENCE:
