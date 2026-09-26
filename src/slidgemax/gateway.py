@@ -30,6 +30,7 @@ from slixmpp.exceptions import XMPPError
 
 from . import config
 from .auth import PendingAuth
+from .client import LoginTokenRevoked, start_once_or_recover
 from .session import Session, make_client, session_dir
 from .util import display_name, normalize_phone, user_id
 
@@ -112,7 +113,7 @@ class Gateway(BaseGateway[Session]):
         pending.client = client
         self._attach_pending_handlers(pending, client)
         pending.task = self.loop.create_task(
-            self._run_pending(pending, client),
+            self._run_pending(pending, client, user_jid.bare),
             name=f"max-register:{user_jid.bare}",
         )
         self.pending[user_jid.bare] = pending
@@ -226,13 +227,24 @@ class Gateway(BaseGateway[Session]):
             if not pending.ready.is_set():
                 pending.failed.set()
 
-    async def _run_pending(self, pending: PendingAuth, client: Client) -> None:
+    async def _run_pending(self, pending: PendingAuth, client: Client, bare_jid: str) -> None:
         try:
-            await client.start()
+            await start_once_or_recover(client, lambda: not pending.ready.is_set())
+        except LoginTokenRevoked as exc:
+            pending.error = str(exc)
+            log.error("MAX login token revoked for %s", pending.phone)
+            pending.failed.set()
+            if pending.ready.is_set():
+                self._notify_revoked(bare_jid)
         except Exception as exc:
             pending.error = str(exc) or type(exc).__name__
             log.exception("Pending MAX login crashed for %s", pending.phone)
             pending.failed.set()
+
+    def _notify_revoked(self, bare_jid: str) -> None:
+        session = self.get_session_from_jid(JID(bare_jid))
+        if session is not None:
+            session.notify_login_revoked()
 
     async def _abort_pending(self, bare_jid: str) -> None:
         pending = self.pending.pop(bare_jid, None)

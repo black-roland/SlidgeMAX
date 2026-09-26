@@ -58,4 +58,6 @@ def test_phone_used_by_registration() -> None:
 
 
 def test_login_requests_full_contact_sync() -> None:
-    assert max_extra_config().sync.contacts_sync == -1
+    extra = max_extra_config()
+    assert extra.sync.contacts_sync == -1
+    assert extra.relogin is False

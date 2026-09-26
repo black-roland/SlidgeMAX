@@ -38,6 +38,12 @@ from slixmpp.exceptions import XMPPError
 
 from . import config
 from .auth import QueuePasswordProvider, QueueSmsProvider
+from .client import (
+    REVOKED_LOGIN_MESSAGE,
+    LoginTokenRevoked,
+    MaxClient,
+    RefuseSmsAuth,
+)
 from .contact import Roster
 from .util import (
     dialog_chat_id,
@@ -85,7 +91,7 @@ def max_extra_config() -> ExtraConfig:
         use_ssl=config.MAX_USE_SSL,
         log_level="INFO",
         persist_session=True,
-        relogin=True,
+        relogin=False,
         telemetry=False,
         sync=SyncOverrides(contacts_sync=-1),
     )
@@ -107,9 +113,11 @@ def make_client(
     }
     if sms_provider is not None:
         kwargs["sms_code_provider"] = sms_provider
+    else:
+        kwargs["auth_flow"] = RefuseSmsAuth()
     if password_provider is not None:
         kwargs["password_provider"] = password_provider
-    return Client(**kwargs)
+    return MaxClient(**kwargs)
 
 
 class Session(BaseSession[Roster, LegacyBookmarks]):
@@ -262,10 +270,20 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
             if not self._client_ready.is_set():
                 self._client_failed.set()
 
+    def notify_login_revoked(self) -> None:
+        self.send_gateway_message(REVOKED_LOGIN_MESSAGE)
+        self.send_gateway_status(REVOKED_LOGIN_MESSAGE, show="dnd")
+
     async def _run_client(self) -> None:
         assert self.client is not None
         try:
             await self.client.start()
+        except LoginTokenRevoked as exc:
+            self._client_error = str(exc)
+            self.log.error("%s", exc)
+            self._client_failed.set()
+            if self._client_ready.is_set():
+                self.notify_login_revoked()
         except Exception as exc:
             self._client_error = str(exc) or type(exc).__name__
             self.log.exception("MAX client crashed: %s", exc)
