@@ -4,11 +4,13 @@ import logging
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
 from pymax.protocol.enums import Opcode
 from pymax.types.domain.presence import Presence
 
+from slidgemax import config
 from slidgemax.session import Session
-from slidgemax.util import contact_presence_entries, map_presence, presence_seen
+from slidgemax.util import contact_presence_entries, map_presence, presence_seen, xmpp_show_online
 
 
 def test_online_with_seen_seconds() -> None:
@@ -89,3 +91,107 @@ async def test_refresh_presence_keeps_online_over_seen_only() -> None:
     ]
     assert session.cached_presence(10) == Presence(status=1, seen=1755700379)
     assert session.cached_presence(20) == Presence(status=1, seen=1755700400)
+
+
+def test_xmpp_show_online() -> None:
+    assert xmpp_show_online("") is True
+    assert xmpp_show_online("chat") is True
+    assert xmpp_show_online("away") is False
+    assert xmpp_show_online("xa") is False
+    assert xmpp_show_online("dnd") is False
+    assert xmpp_show_online("available") is False
+
+
+class _PresenceClient:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.calls: list[bool] = []
+        self.fail = fail
+
+    def set_presence(self, *, online: bool) -> None:
+        if self.fail:
+            raise RuntimeError("set_presence failed")
+        self.calls.append(online)
+
+
+def _outbound_session(client: object | None) -> Session:
+    session = Session.__new__(Session)
+    session.client = client  # type: ignore[assignment]
+    session._max_online = None
+    session.log = logging.getLogger("test-presence")
+    return session
+
+
+async def _send(session: Session, show: str | None, status: str = "") -> None:
+    merged = None if show is None else {"show": show, "status": status, "priority": 0}
+    await session.on_presence("phone", "", status, {}, merged)
+
+
+async def test_on_presence_maps_merged_show() -> None:
+    client = _PresenceClient()
+    session = _outbound_session(client)
+
+    await _send(session, "")
+    await _send(session, "chat")
+    assert client.calls == [True]
+
+    session._max_online = None
+    await _send(session, "away")
+    session._max_online = None
+    await _send(session, "xa")
+    session._max_online = None
+    await _send(session, "dnd")
+    session._max_online = None
+    await _send(session, None)
+    assert client.calls == [True, False, False, False, False]
+
+
+async def test_on_presence_skips_unchanged_and_status_only() -> None:
+    client = _PresenceClient()
+    session = _outbound_session(client)
+
+    await _send(session, "", status="one")
+    await _send(session, "", status="two")
+    await _send(session, "chat", status="three")
+    assert client.calls == [True]
+
+    await _send(session, "away")
+    await _send(session, "dnd", status="busy")
+    assert client.calls == [True, False]
+
+    await _send(session, "chat")
+    assert client.calls == [True, False, True]
+
+
+async def test_on_presence_disabled_or_disconnected(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _PresenceClient()
+    session = _outbound_session(client)
+    monkeypatch.setattr(config, "PRESENCE", False)
+    await _send(session, "")
+    assert client.calls == []
+    assert session._max_online is None
+
+    monkeypatch.setattr(config, "PRESENCE", True)
+    disconnected = _outbound_session(None)
+    await _send(disconnected, "away")
+    assert disconnected._max_online is None
+
+
+async def test_on_presence_retries_after_set_presence_failure() -> None:
+    client = _PresenceClient(fail=True)
+    session = _outbound_session(client)
+    await _send(session, "")
+    assert session._max_online is None
+
+    client.fail = False
+    await _send(session, "")
+    assert client.calls == [True]
+    assert session._max_online is True
+
+
+async def test_publish_online_makes_following_available_a_noop() -> None:
+    client = _PresenceClient()
+    session = _outbound_session(client)
+    session._publish_online(True)
+    await _send(session, "chat", status="here")
+    assert client.calls == [True]
+    assert session._max_online is True

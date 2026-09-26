@@ -35,7 +35,9 @@ from pymax.types.domain.user import User
 from slidge import BaseSession, global_config
 from slidge.command import FormField, SearchResult
 from slidge.group import LegacyBookmarks
+from slidge.util.types import PseudoPresenceShow
 from slixmpp.exceptions import XMPPError
+from slixmpp.types import ResourceDict
 
 from . import config
 from .auth import QueuePasswordProvider, QueueSmsProvider
@@ -59,6 +61,7 @@ from .util import (
     looks_like_incoming_call,
     map_presence,
     message_timestamp,
+    xmpp_show_online,
     normalize_phone,
     parse_call_info,
     payload_as_dict,
@@ -136,6 +139,7 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
         self._bound = False
         self._presence: dict[int, Presence] = {}
         self._unknown_presence: set[int] = set()
+        self._max_online: bool | None = None
 
     @property
     def phone(self) -> str:
@@ -187,11 +191,7 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
             # _bind_client wires on_start to set logged-in state via an Event we wait on.
             await self._wait_client_ready()
 
-        if config.PRESENCE and self.client is not None:
-            try:
-                self.client.set_presence(online=True)
-            except Exception:
-                self.log.warning("set_presence(online=True) failed", exc_info=True)
+        self._publish_online(True)
 
         ident = self.me_id
         if ident is not None:
@@ -440,6 +440,29 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
                 }
             ],
         )
+
+    def _publish_online(self, online: bool) -> None:
+        if not config.PRESENCE or self.client is None or online == self._max_online:
+            return
+        try:
+            self.client.set_presence(online=online)
+        except Exception:
+            self.log.warning("set_presence(online=%s) failed", online, exc_info=True)
+            return
+        self._max_online = online
+
+    async def on_presence(
+        self,
+        resource: str,
+        show: PseudoPresenceShow,
+        status: str,
+        resources: dict[str, ResourceDict],
+        merged_resource: ResourceDict | None,
+    ) -> None:
+        online = merged_resource is not None and xmpp_show_online(
+            str(merged_resource.get("show") or "")
+        )
+        self._publish_online(online)
 
     def cached_presence(self, user_id_: int) -> Presence | None:
         return self._presence.get(user_id_)

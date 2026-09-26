@@ -41,9 +41,12 @@ IGNORE_GROUPS__DOC = (
 
 PRESENCE: bool = True
 PRESENCE__DOC = (
-    "Bridge MAX presence and last seen. After the roster is filled, request a "
-    "presence snapshot and apply later pushes. Pass --presence to disable "
-    "(Slidge inverts boolean flags whose default is true)."
+    "Bridge presence both ways. After the roster is filled, request a MAX "
+    "presence snapshot and apply later pushes. Also publish this account's "
+    "XMPP presence to MAX: available and chat are online, anything else is "
+    "offline, applied on the next MAX ping. Pass --presence to disable both "
+    "directions (Slidge inverts boolean flags whose default is true). "
+    "Per-user opt-out is the Slidge sync_presence preference."
 )
 
 CALL_NOTIFICATIONS: bool = True

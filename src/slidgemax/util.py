@@ -330,6 +330,15 @@ def presence_seen(seen: int | None) -> datetime | None:
         return None
 
 
+def xmpp_show_online(show: str) -> bool:
+    """Return whether an XMPP presence show should be published as MAX online.
+
+    Only an empty show (available) and ``chat`` are online. ``away``, ``xa``,
+    ``dnd``, and any other value are offline. Status text is not part of this.
+    """
+    return show in {"", "chat"}
+
+
 def map_presence(
     status: int | None, seen: int | None
 ) -> tuple[PresenceShow, datetime | None] | None:
