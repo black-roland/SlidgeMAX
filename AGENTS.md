@@ -47,8 +47,9 @@ Confirm APIs in the installed package (`.venv/.../pymax`) before using them. Do 
 
 - Handlers are `async def handler(event, client)`.
 - `client.on_presence()` yields `PresenceEvent` (`user_id`, `presence`). `Presence.status` is `int | None`. `Presence.seen` is Unix time. The only verified status is `1` = online.
-- `client.set_presence(online=True)` is synchronous and only sets `app.config.interactive`. Call it after the client is ready. Log and continue on failure.
+- `client.set_presence(online=True)` is synchronous and only sets `app.config.interactive`. Call it after the client is ready. Log and continue on failure. It does not fetch other users' presence.
 - Login models have no presence list. Do not parse raw login JSON. Forcing `presence_sync=-1` does not recover a snapshot.
+- Last seen at login is opcode 35 `CONTACT_PRESENCE`: request `{"contactIds": [...]}`, response `{"presence": {"<id>": {"seen": <unix>, "status": <int>}}}`. PyMax 2.4.1 does not wrap this. `Session.refresh_presence` calls `client._app.invoke`. Apply the result only after `is_friend` is true; Slidge drops presence stanzas for non-friends.
 - 1:1 chat ids are the XOR of the two user ids (`dialog_chat_id` / `dialog_peer_id`).
 - If PyMax does not expose the data, change PyMax, not this repo. See `CONTRIBUTING.md`.
 

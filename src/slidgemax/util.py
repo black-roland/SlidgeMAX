@@ -347,6 +347,39 @@ def map_presence(
     return ("away", last_seen)
 
 
+def _presence_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def contact_presence_entries(
+    payload: object,
+) -> list[tuple[int, int | None, int | None]]:
+    """Parse an opcode 35 ``presence`` map into ``(user_id, status, seen)``.
+
+    The map is keyed by user id. Login payloads are not a presence list and are
+    ignored here.
+    """
+    if not isinstance(payload, dict):
+        return []
+    raw = payload.get("presence")
+    if not isinstance(raw, dict):
+        return []
+    entries: list[tuple[int, int | None, int | None]] = []
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            continue
+        try:
+            uid = int(key)
+        except (TypeError, ValueError):
+            continue
+        if uid <= 0:
+            continue
+        entries.append((uid, _presence_int(value.get("status")), _presence_int(value.get("seen"))))
+    return entries
+
+
 def message_timestamp(message: Message):
     """Return a timezone-aware datetime, or None if MAX sent nothing useful."""
     raw = message.time

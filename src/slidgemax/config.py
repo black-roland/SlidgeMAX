@@ -41,9 +41,9 @@ IGNORE_GROUPS__DOC = (
 
 PRESENCE: bool = True
 PRESENCE__DOC = (
-    "Bridge MAX presence and last seen. Contacts stay unmarked until a presence "
-    "push arrives. Pass --presence to disable (Slidge inverts boolean flags whose "
-    "default is true)."
+    "Bridge MAX presence and last seen. After the roster is filled, request a "
+    "presence snapshot and apply later pushes. Pass --presence to disable "
+    "(Slidge inverts boolean flags whose default is true)."
 )
 
 CALL_NOTIFICATIONS: bool = True

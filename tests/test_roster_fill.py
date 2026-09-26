@@ -52,6 +52,10 @@ class _Session:
         self._chats = chats or []
         self.client = client
         self.me_id = me_id
+        self.presence_ids: list[int] = []
+
+    async def refresh_presence(self, user_ids: list[int]) -> None:
+        self.presence_ids = list(user_ids)
 
     def max_contacts(self) -> list[User]:
         return self._contacts
@@ -75,7 +79,13 @@ def _roster(
 
     async def by_legacy_id(legacy_id: str, *args: object) -> SimpleNamespace:
         calls.append((legacy_id, *args))
-        return SimpleNamespace(is_friend=False, legacy_id=legacy_id)
+        contact = SimpleNamespace(is_friend=False, legacy_id=legacy_id, applied=False)
+
+        def apply_presence() -> None:
+            contact.applied = True
+
+        contact.apply_presence = apply_presence
+        return contact
 
     def by_legacy_id_if_exists(legacy_id: str) -> SimpleNamespace | None:
         if legacy_id in known:
@@ -116,6 +126,10 @@ async def test_fill_batches_dialog_peers_missing_from_address_book() -> None:
     assert yielded[0].is_friend is True
     assert yielded[1].is_friend is False
     assert yielded[2].is_friend is False
+    assert session.presence_ids == [10, 20, 30]
+    assert yielded[0].applied is True
+    assert yielded[1].applied is False
+    assert yielded[2].applied is False
 
 
 async def test_fill_does_not_retry_omitted_peer() -> None:

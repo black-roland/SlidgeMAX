@@ -121,8 +121,11 @@ class Contact(SetAvatarMixin, LegacyContact):
         await self.session.delete_text(int(self.legacy_id), int(legacy_msg_id))
 
     async def on_friend_request(self, text: str = "") -> None:
-        await self.session.add_max_contact(int(self.legacy_id))
+        ident = int(self.legacy_id)
+        await self.session.add_max_contact(ident)
         self.is_friend = True
+        await self.session.refresh_presence([ident])
+        self.apply_presence()
         await self.accept_friend_request()
 
     async def on_friend_delete(self, text: str = "") -> None:
@@ -157,6 +160,8 @@ class Roster(LegacyRoster[Contact]):
         seen: set[str] = set()
         me = session.me_id
 
+        ready: list[Contact] = []
+
         for user in session.max_contacts():
             ident = user_id(user)
             if ident is None or ident == me:
@@ -167,7 +172,7 @@ class Roster(LegacyRoster[Contact]):
             seen.add(key)
             contact = await self.by_legacy_id(key, user)
             contact.is_friend = True
-            yield contact
+            ready.append(contact)
 
         dialog_peers: list[int] = []
         for chat in session.max_chats():
@@ -193,6 +198,12 @@ class Roster(LegacyRoster[Contact]):
                 contact = await self.by_legacy_id(key, fetched.get(peer), True)
             else:
                 contact = await self.by_legacy_id(key)
+            ready.append(contact)
+
+        await session.refresh_presence([int(contact.legacy_id) for contact in ready])
+        for contact in ready:
+            if contact.is_friend:
+                contact.apply_presence()
             yield contact
 
     async def _fetch_users(self, peer_ids: list[int]) -> dict[int, User]:

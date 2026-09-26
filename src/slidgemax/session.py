@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any
 
 from pymax import Client, ExtraConfig, PresenceEvent, SyncOverrides
 from pymax.api.session.enums import DeviceType
+from pymax.protocol.enums import Opcode
 from pymax.protocol.models import InboundFrame
 from pymax.types.domain.attachments.call import CallAttachment
 from pymax.types.domain.chat import Chat
@@ -46,6 +47,7 @@ from .client import (
 )
 from .contact import Roster
 from .util import (
+    contact_presence_entries,
     dialog_chat_id,
     dialog_peer_from_chat,
     dialog_peer_id,
@@ -69,6 +71,8 @@ if TYPE_CHECKING:
     from .gateway import Gateway
 
 log = logging.getLogger(__name__)
+
+_PRESENCE_CHUNK = 50
 
 
 def session_dir(jid: str) -> Path:
@@ -440,6 +444,53 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
     def cached_presence(self, user_id_: int) -> Presence | None:
         return self._presence.get(user_id_)
 
+    def _remember_presence(self, uid: int, presence: Presence) -> None:
+        old = self._presence.get(uid)
+        status = presence.status
+        seen = presence.seen
+        if old is not None and old.status == 1 and status != 1:
+            status = 1
+        if seen is None and old is not None:
+            seen = old.seen
+        if map_presence(status, seen) is None:
+            return
+        self._presence[uid] = Presence(status=status, seen=seen)
+
+    async def refresh_presence(self, user_ids: list[int]) -> None:
+        if not config.PRESENCE or self.client is None:
+            return
+        me = self.me_id
+        unique: list[int] = []
+        seen: set[int] = set()
+        for uid in user_ids:
+            if not isinstance(uid, int) or uid <= 0 or uid == me or uid in seen:
+                continue
+            seen.add(uid)
+            unique.append(uid)
+        if not unique:
+            return
+        for start in range(0, len(unique), _PRESENCE_CHUNK):
+            chunk = unique[start : start + _PRESENCE_CHUNK]
+            try:
+                response = await self.client._app.invoke(
+                    Opcode.CONTACT_PRESENCE,
+                    {"contactIds": chunk},
+                )
+            except Exception:
+                self.log.warning(
+                    "CONTACT_PRESENCE failed for %s contacts", len(chunk), exc_info=True
+                )
+                continue
+            for uid, status, seen_at in contact_presence_entries(response.payload):
+                if uid not in seen:
+                    continue
+                self._remember_presence(uid, Presence(status=status, seen=seen_at))
+        self.log.info(
+            "MAX presence snapshot: %s/%s contacts",
+            sum(1 for uid in unique if uid in self._presence),
+            len(unique),
+        )
+
     def _on_max_presence(self, event: PresenceEvent) -> None:
         if not config.PRESENCE:
             return
@@ -454,13 +505,16 @@ class Session(BaseSession[Roster, LegacyBookmarks]):
             and status not in self._unknown_presence
         ):
             self._unknown_presence.add(status)
-            self.log.debug("Unknown MAX presence status %s", status)
-        if map_presence(status, presence.seen) is None:
+            self.log.info("Unknown MAX presence status %s for user %s", status, uid)
+        self.log.info(
+            "MAX presence user=%s status=%s seen=%s", uid, status, presence.seen
+        )
+        self._remember_presence(uid, presence)
+        if uid not in self._presence:
             return
-        self._presence[uid] = presence
         contact = self.contacts.by_legacy_id_if_exists(str(uid))
         if contact is not None:
-            contact.apply_presence(presence)
+            contact.apply_presence(self._presence[uid])
 
     async def _contact(self, peer_id: int):
         return await self.contacts.by_legacy_id(str(peer_id))
